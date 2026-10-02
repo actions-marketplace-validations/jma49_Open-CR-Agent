@@ -5,7 +5,7 @@ import {
   coverageGaps,
   defaultSelectionPolicy,
   docsReviewerPlugin,
-  newSessionId,
+  newRunId,
   type OcraPlugin,
   performanceReviewerPlugin,
   previewReview,
@@ -100,7 +100,7 @@ export async function reviewCommand(
         )
       : await localTarget(localArgs, deps.cwd, root, deps.env, warn, deps.fetch);
   const { config } = target;
-  const session = { dir: join(root, SESSIONS_DIR), id: newSessionId() };
+  const session = { dir: join(root, SESSIONS_DIR), id: newRunId() };
 
   // A plan calls no model and writes no session log.
   const builtins = args.plan
@@ -156,6 +156,7 @@ export async function reviewCommand(
   let report: ReviewReport;
   try {
     report = await review({
+      runId: session.id,
       signal: interrupt.signal,
       ...runOptions(config),
       reviewerOverrides: overrides,
