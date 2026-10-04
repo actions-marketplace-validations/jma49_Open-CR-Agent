@@ -1,4 +1,4 @@
-import { SUMMARY_MARKER, writeState } from "@open-cr-agent/vcs-platform";
+import { SUMMARY_MARKER, writeState } from "@open-cr-agent/vcs-platform/internal";
 import { describe, expect, it } from "vitest";
 import {
   AUTHOR,
@@ -10,8 +10,8 @@ import {
   OUTSIDER,
   report,
 } from "../../vcs-platform/src/conformance.fakes.js";
+import { adapter, bodies, diff, fakeGitLab, START } from "./adapter.fakes.js";
 import { positionOf } from "./adapter.js";
-import { adapter, bodies, diff, fakeGitLab, START } from "./gitlab.fakes.js";
 
 const refs = { base_sha: BASE, start_sha: START, head_sha: HEAD };
 const A = "a".repeat(16);
@@ -82,6 +82,22 @@ describe("GitLabAdapter", () => {
     expect(summary).toContain("### Findings outside the diff");
     expect(summary).toContain("**Refused**");
     expect(summary).not.toContain("**Placed**");
+  });
+
+  it("offers a finding's fix as a suggestion GitLab can apply, from the thread's line", async () => {
+    const { calls, fetchImpl } = fakeGitLab({});
+    await adapter(fetchImpl).publish(
+      report([
+        finding(A, {
+          lineRange: { start: 2, end: 3 },
+          fix: { startLine: 2, endLine: 3, replacement: "a();\nb();" },
+        }),
+      ]),
+    );
+    const [thread] = bodies(calls, "POST", "/discussions");
+    expect(thread).toMatch(/\n\n```suggestion:-1\+0\na\(\);\nb\(\);\n```$/);
+    const discussion = calls.find((c) => c.method === "POST" && c.path.endsWith("/discussions"));
+    expect(discussion?.body).toMatchObject({ position: { new_line: 3 } });
   });
 
   it("turns a failed thread into a warning and still writes the summary", async () => {

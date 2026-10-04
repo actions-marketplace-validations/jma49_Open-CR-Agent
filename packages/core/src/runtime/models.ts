@@ -1,3 +1,5 @@
+import type { ModelChains, ModelTier } from "../contracts.js";
+import { OcraError } from "../errors.js";
 import { MAX_QUOTA_WAIT_MS, QUOTA_RETRIES, type QuotaError } from "./quota.js";
 
 export interface ModelRef {
@@ -8,11 +10,23 @@ export interface ModelRef {
 export function parseModel(model: string): ModelRef {
   const slash = model.indexOf("/");
   if (slash <= 0 || slash === model.length - 1) {
-    throw new Error(
+    throw new OcraError(
+      "CONFIG_INVALID",
       `Model "${model}" must be written as provider/model, for example google/gemini-flash-lite-latest`,
     );
   }
   return { providerID: model.slice(0, slash), modelID: model.slice(slash + 1) };
+}
+
+// The chain a call runs on: the agent's own when the call carries one
+// (ADR-0025), else its tier's. Health is kept per model, so a model in two
+// chains shares one circuit and one quota.
+export function callChain(
+  tiers: ModelChains,
+  tier: ModelTier,
+  own: readonly string[] | undefined,
+): readonly string[] {
+  return own?.length ? own : (tiers[tier] ?? []);
 }
 
 export interface CircuitOptions {

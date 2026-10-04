@@ -27,13 +27,13 @@ npm run verify   # Biome, type check and tests; no model or network calls
 
 ## The rules
 
-[AGENTS.md](AGENTS.md) holds the rules for everyone, people and AI agents alike: architecture and package boundaries, security practices, testing, the 500-line limit per file, commit messages and the pull request flow. Read [docs/architecture.md](docs/architecture.md) and [docs/pitfalls.md](docs/pitfalls.md) before changing the runtime, git or evaluation code. The ones contributors most often miss:
+[AGENTS.md](AGENTS.md) holds the rules for everyone, people and AI agents alike: architecture and package boundaries, security practices, testing, the 500-line limit per file, commit messages and the pull request flow. Read [docs/architecture.md](docs/architecture.md) before changing the runtime, git or evaluation code. The ones contributors most often miss:
 
 - Keep a pull request to one change, and keep `npm run verify` green.
 - New behavior ships with a test at the lowest layer that can express it; a fix ships with a test that fails without it.
 - Tests never call a model or the network: use the fakes next to the tests.
 - A change to user-facing behavior updates the manual in `docs/manual/en` and `docs/manual/zh` in the same pull request. If you cannot write one of the two languages, say so in the pull request and a maintainer will add it.
-- Commit messages follow [Conventional Commits](https://www.conventionalcommits.org/); pull requests are merged with a rebase, so each commit lands on `main` as written.
+- Commit messages follow [Conventional Commits](https://www.conventionalcommits.org/) (CI checks a pull request's commits; `npx commitlint --from origin/main` checks yours); pull requests are merged with a rebase, so each commit lands on `main` as written.
 
 ## License
 

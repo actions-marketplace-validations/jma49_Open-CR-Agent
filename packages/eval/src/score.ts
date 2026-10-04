@@ -1,5 +1,6 @@
 import type { AnchoringSummary, OutputFinding, Usage } from "@open-cr-agent/core";
-import type { Instance } from "./dataset.js";
+import { at } from "@open-cr-agent/core/internal";
+import type { Instance } from "./instance.js";
 import {
   type GeneratedComment,
   matchComments,
@@ -14,9 +15,9 @@ import {
   type QualityMetrics,
   qualityMetrics,
 } from "./metrics.js";
-import type { InstanceResult } from "./runner.js";
+import type { InstanceResult } from "./results.js";
 
-export interface Scored {
+interface Scored {
   counts: Counts;
   metrics: QualityMetrics;
 }
@@ -135,7 +136,7 @@ function recallBy(matches: readonly ReferenceMatch[], key: (m: ReferenceMatch) =
 
 function percentile(sorted: readonly number[], p: number): number {
   if (sorted.length === 0) return 0;
-  return sorted[Math.min(sorted.length - 1, Math.floor(p * sorted.length))] as number;
+  return at(sorted, Math.min(sorted.length - 1, Math.floor(p * sorted.length)));
 }
 
 function anchoringOf(

@@ -1,8 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
-import type { AgentRuntime, VcsAdapter } from "../contracts.js";
-import type { ReviewEvent } from "../pipeline/report.js";
+import type { AgentRuntime } from "../contracts.js";
+import type { ReviewEvent } from "../report/report.js";
 import { correctnessReviewer } from "../review/reviewers/correctness.js";
+import type { VcsAdapter } from "../vcs.js";
 import { correctnessReviewerPlugin } from "./builtin.js";
 import { startPlugins } from "./host.js";
 import { PluginError } from "./registry.js";
@@ -174,6 +175,15 @@ describe("startPlugins", () => {
       configure: (ctx) => ctx.registerTool(tool("report_finding")),
     };
     await expect(startPlugins([hijack])).rejects.toBeInstanceOf(PluginError);
+
+    // Reviewer ids share a namespace with the roles a configuration can set.
+    for (const role of ["judge", "verifier", "helper"]) {
+      const named: OcraPlugin = {
+        name: `as-${role}`,
+        configure: (ctx) => ctx.registerReviewer({ ...correctnessReviewer, id: role }),
+      };
+      await expect(startPlugins([named])).rejects.toThrow(`cannot register reviewer "${role}"`);
+    }
   });
 
   it("forbids registration after the configure phase", async () => {

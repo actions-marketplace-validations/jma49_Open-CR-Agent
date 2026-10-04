@@ -1,0 +1,25 @@
+// Writes the JSON Schemas of the review report (docs/schema/report.v1.json),
+// from the Zod schema in @open-cr-agent/core, and of .ocra/config.json
+// (docs/schema/config.v1.json) and the --plan JSON (docs/schema/plan.v1.json),
+// from the CLI's. Run after a build; tests
+// fail when a file and its schema differ.
+import { mkdirSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { configJsonSchema, planJsonSchema } from "@open-cr-agent/cli/internal";
+import { REPORT_VERSION, reportJsonSchema } from "@open-cr-agent/core";
+import { PLAN_VERSION } from "@open-cr-agent/core/internal";
+
+const root = join(dirname(fileURLToPath(import.meta.url)), "..");
+/** @type {[string, Record<string, unknown>][]} */
+const schemas = [
+  [`report.v${REPORT_VERSION}.json`, reportJsonSchema()],
+  ["config.v1.json", configJsonSchema()],
+  [`plan.v${PLAN_VERSION}.json`, planJsonSchema()],
+];
+for (const [name, schema] of schemas) {
+  const target = join(root, "docs", "schema", name);
+  mkdirSync(dirname(target), { recursive: true });
+  writeFileSync(target, `${JSON.stringify(schema, null, 2)}\n`);
+  console.log(`wrote ${target}`);
+}

@@ -27,12 +27,12 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-      - uses: jma49/Open-CR-Agent@v0.2.0
+      - uses: jma49/Open-CR-Agent@d3af4e2189007de77dcf17e736855d04be4a491c # v0.5.0
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
 ```
 
-`@v0.2.0` is a release. A tag can be moved, so to fix the exact code that runs with your model key, pin the release's commit instead (`jma49/Open-CR-Agent@<commit> # v0.2.0`).
+The Action is pinned to the commit of the v0.5.0 release, with the version as a comment. A tag can be moved, and a commit fixes the exact code that runs with your model key; `git ls-remote --tags https://github.com/jma49/Open-CR-Agent v0.3.0` prints a release's commit, and Dependabot updates such pins and their comment.
 
 From v0.1.1, the Action installs ocra from npm: the `@open-cr-agent/cli` published at the Action's own version, with every dependency at the version the Action's `package-lock.json` pins, install scripts off and, on the npm registry, the registry's signatures checked. It uses them only when each of ocra's own packages has [provenance](./stability#verifying-a-release) showing it was built by this repository's release workflow from the version's tag; otherwise it builds its own source, with a warning. npm never changes a published version. While a version is not on npm yet, in a release's first minutes, the Action builds its own source instead; v0.1.0 always does. So `@main` runs the Action code on `main` with the release `main` names, not unreleased package code, unless `main` has changed the packages' dependencies since that release: then it builds `main`.
 
@@ -45,10 +45,59 @@ Store your model key as a repository secret. Models come from the base branch's 
 | `github-token` | `${{ github.token }}` | Token for reading the pull request and posting the review |
 | `args` | | Extra `ocra review` options, such as `--reviewers correctness,security`, split on spaces and newlines (no quoting) |
 | `fail-on-concerns` | `false` | Fail the job when the verdict is `significant_concerns` (a critical finding the verifier confirmed). An incomplete review (exit code `3`) always fails the job |
+| `opencode` | `true` | Install OpenCode, the default runtime. Set `false` when the configuration sets `"runtime": "direct"`; see [The runtime](#the-runtime). New in v0.3.0 |
+| `sarif` | `false` | Also write the review as SARIF 2.1.0 for [code scanning](#code-scanning), to the file the `sarif` output names. It takes the place of `--format` and `--output` in `args` |
+
+Give the step an `id` to read its outputs. They are set whenever ocra ran, also when the step fails:
+
+| Output | Meaning |
+|---|---|
+| `verdict` | `approved`, `approved_with_comments`, `minor_issues` or `significant_concerns` |
+| `exit-code` | ocra's [exit code](./cli#exit-codes), before `fail-on-concerns` turns `1` into a passing step |
+| `run-id` | The run id, also in the summary comment and the SARIF log |
+| `report` | Path to the JSON report, the shape of [`--format json`](./cli#json-output), under `$RUNNER_TEMP` |
+| `findings` | The number of findings in the report |
+| `sarif` | Path to the SARIF log, when `sarif` is `true` |
+
+`verdict` is empty unless the review completed (exit code `0` or `1`): a run that could not review everything (exit `2` or `3`) may still write a report, but its verdict says nothing about the unreviewed files. `run-id`, `report` and `findings` are empty when ocra wrote no report. For example, to keep the report and say the verdict in the job summary:
+
+```yaml
+      - id: ocra
+        uses: jma49/Open-CR-Agent@d3af4e2189007de77dcf17e736855d04be4a491c # v0.5.0
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      - if: ${{ !cancelled() && steps.ocra.outputs.report != '' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: ocra-report
+          path: ${{ steps.ocra.outputs.report }}
+      - if: ${{ !cancelled() }}
+        env:
+          VERDICT: ${{ steps.ocra.outputs.verdict }}
+          FINDINGS: ${{ steps.ocra.outputs.findings }}
+          RUN_ID: ${{ steps.ocra.outputs.run-id }}
+        run: echo "ocra: $VERDICT, $FINDINGS findings (run $RUN_ID)" >> "$GITHUB_STEP_SUMMARY"
+```
+
+Pass outputs to a script through `env`, as here, rather than writing `${{ }}` into `run`.
 
 The verdict is advice. The models read the pull request, so its author can plant text that steers a reviewer away from an issue or talks the judge out of one, and an unverified model claim can be wrong. Do not make the check a required status in place of human review; if you turn on `fail-on-concerns`, treat a pass as "nothing confirmed", not "safe".
 
 Pull requests from forks get no secrets on `pull_request`, so their review stops with a message naming the missing key. To review them, see [Pull requests from forks](#pull-requests-from-forks).
+
+### The runtime
+
+The Action installs OpenCode, the default runtime: with its native binary for the runner's platform, it is 97 of the 108 packages the Action installs and about 165 MB of 175 MB. When every model in the base branch's configuration is on an endpoint you declare and that configuration sets `"runtime": "direct"` ([Choosing the runtime](./providers#choosing-the-runtime)), set `opencode: false`: the install leaves OpenCode out and takes 11 packages. Should the configuration then select `opencode`, the review stops before any model call with exit code `2`, naming the missing package. The input is new in v0.3.0.
+
+```yaml
+      - uses: jma49/Open-CR-Agent@<commit> # v0.5.0
+        with:
+          opencode: false
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+```
+
+The install is not cached between runs: it uses an npm cache of its own each time, so every package, signature and provenance statement comes from the registry, never from a cache another workflow of the repository could have written.
 
 ## What gets posted
 
@@ -66,9 +115,15 @@ ocra then compares findings with the previous review:
 
 Reviewers stay in charge. If someone with write access to the repository (admin, maintain or write permission) other than the pull request's author resolves one of ocra's threads, or replies `/ocra dismiss`, or replies with a message that opens with a clear decline ("won't fix", "will not fix", "by design", "false positive", "not a bug", "working as intended", "intended behavior") and is not a question, the finding counts as dismissed: it is no longer reported and no longer affects the verdict, unless a later run finds it with a higher severity. The same words elsewhere in a reply ("this is not intended, good catch", "is this by design?") do not count, and neither does "I disagree". Such a reply from someone who could dismiss the finding is shown to the judge whenever the finding is reported again; the judge may drop the finding when the reply gives a specific reason it is wrong, never a confirmed critical finding. The author's own replies are not shown. The author cannot dismiss findings on their own pull request, and a reply someone else edited does not count (anyone with write access can edit any comment), so the check cannot be resolved away. Only findings with an inline thread can be dismissed this way; for others use [`ocra memory`](./cli).
 
+### Committable suggestions
+
+A finding can carry a fix: code that replaces the lines it is about. Its inline comment then ends with a suggestion block, which anyone with write access can commit from the pull request with one click (**Commit suggestion**, or add it to a batch). ocra offers one only when the comment sits on exactly the lines the fix replaces, never for findings in the summary. The code is posted exactly as the fix has it or not at all: a fix holding an HTML comment opener, `/ocra`, a carriage return or a control or bidirectional character, or longer than 20,000 characters, gets no suggestion block; the finding is still posted. Read a suggestion before you commit it: it is a language model's proposal.
+
+**Planned:** no reviewer produces fixes yet; that waits for an evaluated prompt change ([ADR-0029](https://github.com/jma49/Open-CR-Agent/blob/main/docs/adr/0029-committable-suggestions.md)). Until then comments carry the suggestion as text, as before.
+
 ## Code scanning
 
-To see the findings as code scanning alerts as well, write SARIF and upload it with GitHub's `upload-sarif` action. Add a permission and two lines to the workflow above:
+To see the findings as code scanning alerts as well, write SARIF with the `sarif` input and upload it with GitHub's `upload-sarif` action. Add a permission and a few lines to the workflow above:
 
 ```yaml
 permissions:
@@ -83,20 +138,21 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-      - uses: jma49/Open-CR-Agent@v0.2.0
+      - id: ocra
+        uses: jma49/Open-CR-Agent@d3af4e2189007de77dcf17e736855d04be4a491c # v0.5.0
         with:
-          args: --format sarif --output ocra.sarif
+          sarif: true
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
       - uses: github/codeql-action/upload-sarif@v4
         # Also after an incomplete review, which fails the step above.
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.ocra.outputs.sarif != '' }}
         with:
-          sarif_file: ocra.sarif
+          sarif_file: ${{ steps.ocra.outputs.sarif }}
           category: ocra
 ```
 
-- The review is still posted to the pull request: `--output` only redirects what ocra prints.
+- The review is still posted to the pull request, and the `report` output still names the JSON report: SARIF only changes what ocra prints. `args: --format sarif --output ocra.sarif` does the same with a path of your choosing.
 - Code scanning shows only results with lines. Findings ocra could not tie to lines are in the file but not shown there. So are findings from an earlier review in files not changed since: after the first review of a pull request, ocra reviews only what changed. For code scanning to show every finding on every push, add `--full` to `args`, at the cost of a full review each time.
 - Code scanning is available for public repositories; private ones need GitHub Code Security.
 - What the file holds: [SARIF output](./cli#sarif-output).
@@ -107,7 +163,7 @@ The same job can hand ocra the results of Semgrep, CodeQL or another analyzer th
 
 ```yaml
       - run: pipx run semgrep scan --config p/default --metrics=off --sarif --output semgrep.sarif
-      - uses: jma49/Open-CR-Agent@v0.2.0
+      - uses: jma49/Open-CR-Agent@d3af4e2189007de77dcf17e736855d04be4a491c # v0.5.0
         with:
           args: --import-sarif semgrep.sarif
         env:
@@ -169,7 +225,7 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - uses: jma49/Open-CR-Agent@<commit> # v0.2.0
+      - uses: jma49/Open-CR-Agent@d3af4e2189007de77dcf17e736855d04be4a491c # v0.5.0
         with:
           args: --max-cost-usd 2
         env:
@@ -226,7 +282,7 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - uses: jma49/Open-CR-Agent@<commit> # v0.2.0
+      - uses: jma49/Open-CR-Agent@d3af4e2189007de77dcf17e736855d04be4a491c # v0.5.0
         with:
           github-token: ${{ steps.app.outputs.token }}
           args: --max-cost-usd 2

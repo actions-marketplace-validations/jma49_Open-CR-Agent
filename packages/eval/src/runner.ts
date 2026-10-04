@@ -1,47 +1,19 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import type {
-  AnchoringSummary,
-  OutputFinding,
-  TaskOutcome,
-  Usage,
-  Verdict,
-} from "@open-cr-agent/core";
+import type { Usage } from "@open-cr-agent/core";
+import { errorMessage } from "@open-cr-agent/core";
 import { plantAttack } from "./attack.js";
-import type { Instance } from "./dataset.js";
+import type { Instance } from "./instance.js";
 import { prepareRepository, UnavailableCommitError } from "./repos.js";
+import { type InstanceResult, readResult } from "./results.js";
 import { reviewInstance } from "./reviewer.js";
-
-export type InstanceStatus =
-  | "reviewed"
-  | "failed"
-  | "unavailable"
-  | "skipped_budget"
-  | "skipped_quota";
 
 // What ocra's runtime reports when a provider refuses for quota. A free-tier
 // daily limit refuses every later PR too, and each ocra process would first
 // wait out the provider's retry hint, so the run stops instead. Kept as text:
 // eval sees ocra's report, not the runtime's types.
 const QUOTA_ERROR =
-  /out of quota for this run|exceeded your current quota|quota exceeded|resource[_ ]exhausted/i;
-
-export interface InstanceResult {
-  id: string;
-  status: InstanceStatus;
-  durationMs: number;
-  findings: OutputFinding[];
-  // How ocra anchored the findings; absent in results written before it
-  // was published.
-  anchoring?: AnchoringSummary;
-  usage: Usage;
-  tasks: Pick<TaskOutcome, "taskId" | "status" | "error">[];
-  // The CLI's exit code; 3 means the review was incomplete.
-  exitCode?: number;
-  // Absent in results written before it was recorded.
-  verdict?: Verdict;
-  error?: string;
-}
+  /out of quota for this run|exceeded your current quota|quota exceeded|resource[_ ]exhausted|rate limit[^)]*per[- ]day/i;
 
 export interface RunOptions {
   runDir: string;
@@ -50,7 +22,8 @@ export interface RunOptions {
   reviewArgs?: readonly string[];
   timeoutMs: number;
   maxCostUsd?: number;
-  // Run PRs again whose previous attempt failed instead of reusing the failure.
+  // Run PRs again whose previous attempt failed, or lost tasks to a spent
+  // quota, instead of reusing that result.
   retryFailed?: boolean;
   prepare?: (reposDir: string, instance: Instance) => Promise<string>;
   log(message: string): void;
@@ -78,11 +51,17 @@ export async function runInstances(
 
   for (const [n, instance] of instances.entries()) {
     const path = join(dir, `${instance.id}.json`);
-    const previous = await readResult(path);
+    // A result that cannot be read (a run killed while writing it) is run again.
+    const previous = await readResult(path).catch((error: unknown) => {
+      options.log(`${instance.id}: running again: ${errorMessage(error)}`);
+      return undefined;
+    });
     const retry =
       previous?.status === "skipped_budget" ||
       previous?.status === "skipped_quota" ||
-      (options.retryFailed === true && previous?.status === "failed");
+      (options.retryFailed === true &&
+        previous !== undefined &&
+        (previous.status === "failed" || cutByQuota(previous)));
     if (previous && !retry) {
       results.push(previous);
       spent += previous.usage.costUsd;
@@ -112,7 +91,7 @@ export async function runInstances(
     );
     await writeFile(path, `${JSON.stringify(result, null, 2)}\n`);
     results.push(result);
-    if (failedOnQuota(result)) {
+    if (failedOnQuota(result) || cutByQuota(result)) {
       quotaSpent = true;
       options.log(
         "the model quota is spent; the remaining PRs are skipped (rerun later to resume)",
@@ -133,14 +112,14 @@ async function reviewOne(
     repoDir = await (options.prepare ?? prepareRepository)(options.reposDir, instance);
   } catch (error) {
     const status = error instanceof UnavailableCommitError ? "unavailable" : "failed";
-    return { ...base, status, durationMs: 0, error: (error as Error).message };
+    return { ...base, status, durationMs: 0, error: errorMessage(error) };
   }
   let target = instance;
   if (instance.golden?.attack) {
     try {
       target = { ...instance, headCommit: await plantAttack(repoDir, instance) };
     } catch (error) {
-      const message = `planting the attack failed: ${(error as Error).message}`;
+      const message = `planting the attack failed: ${errorMessage(error)}`;
       return { ...base, status: "failed", durationMs: 0, error: message };
     }
   }
@@ -170,20 +149,23 @@ async function reviewOne(
   };
   if (report?.anchoring) result.anchoring = report.anchoring;
   if (report) result.verdict = report.verdict;
+  if (report?.provenance) result.provenance = report.provenance;
   if (outcome.error) result.error = outcome.error;
   return result;
 }
 
-async function readResult(path: string): Promise<InstanceResult | undefined> {
-  try {
-    return JSON.parse(await readFile(path, "utf8")) as InstanceResult;
-  } catch {
-    return undefined;
-  }
-}
-
 function skipped(id: string, status: "skipped_budget" | "skipped_quota"): InstanceResult {
   return { id, status, durationMs: 0, findings: [], usage: NO_USAGE, tasks: [] };
+}
+
+// A review that finished (an incomplete report, exit 3) after the quota
+// refused some of its tasks: not a measurement of the configuration, and the
+// PRs after it would be refused too.
+function cutByQuota(result: InstanceResult): boolean {
+  return (
+    result.status === "reviewed" &&
+    result.tasks.some((t) => t.status === "failed" && QUOTA_ERROR.test(t.error ?? ""))
+  );
 }
 
 function failedOnQuota(result: InstanceResult): boolean {

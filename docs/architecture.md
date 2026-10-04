@@ -40,6 +40,10 @@ The two split work along different axes: Cloudflare by **review domain**, OCR by
 | 10 | Judge | top-tier LLM | Coordinator deduplicates across reviewers, recalibrates severity, filters speculation and nitpicks, and writes the summary. The verdict itself is code (`judge/verdict.ts`) over the judged findings. |
 | 11 | Publish | code | Post one summary comment plus inline comments, apply the verdict, update threads from the previous review. |
 
+In core, `reviewWithHooks` (`pipeline/run.ts`) only sequences them: `planReview` (stages 1–4), `executeStage` (5–7, `pipeline/execute-stage.ts`, one `runJob` per cell), `filterStage` (8), `checkStage` (9–10), then `assembleReport`. Each stage returns its own warnings and usage, and the report lists them in stage order; the spend tracker and the run's signal are the only state they share.
+
+Core's modules form layers with no import cycle, type imports included: `contracts.ts` (the runtime contract) and `domain.ts` at the bottom; `agent/` above them (what every model call shares: an agent's settings, JSON answers, the spend tracker, bounded concurrency, usage sums); the stages (`select/`, `bundle/`, `review/`, `verify/`, `judge/`, `anchor/`, …) above that, depending only downwards; `report/` above the stages whose results it records (the report, its published output and schema, provenance); and `pipeline/` on top, orchestrating them. The published `ReportOutput` type is derived from `reportOutputSchema`, and `toReportOutput` copies domain values into it field by field, so a field added to a domain type never reaches the JSON report by accident. `vcs.ts` holds `VcsAdapter`, which publishes the report and so sits above it.
+
 ## Reviewers
 
 | Reviewer | Scope | Default model tier |
@@ -138,7 +142,7 @@ interface OcraPlugin {
 // ConfigureContext: registerVcs, registerRuntime, registerReviewer, registerRules, registerTool, onEvent
 ```
 
-The pipeline owns orchestration. `AgentRuntime` only executes one isolated agent task, so the runtime can be swapped (OpenCode today, see ADR-0003).
+The pipeline owns orchestration. `AgentRuntime` only executes one isolated agent task, so the runtime can be swapped: `runtime-opencode` (OpenCode, ADR-0003) and `runtime-direct` (declared OpenAI-compatible endpoints, ADR-0020), both held to the runtime conformance suite. Neither implements failback: each gives core's `ChainRunner` single-model attempts (`ModelAttempts`), and the runner resolves the call's chain, keeps model health and fails over, the same way for both and for a third-party runtime built on it. What else a runtime needs (the review tools, the step cap, quota parsing, redaction) is public in core too; neither runtime imports `@open-cr-agent/core/internal`.
 
 ## Resilience
 
@@ -158,9 +162,14 @@ packages/
   vcs-github/        VcsAdapter for GitHub, over vcs-platform
   vcs-gitlab/        VcsAdapter for GitLab merge requests, over vcs-platform
   vcs-local/         VcsAdapter for the local git repository
+  cloud-contract/    the wire contract with ocra Cloud: schemas, limits, redaction
   cli/               `ocra` command
   eval/              AACR-Bench replay, precision / recall / F1 / cost
 ```
+
+Each published package has a curated main entry, its public API: named exports only, recorded in `etc/<package>.api.md` by API Extractor and checked in CI (`npm run check:api`), so a change to it shows in review. What the packages share with each other beyond that goes through a `./internal` subpath export (`@open-cr-agent/core/internal` and others), which is not a contract and may change in any release. The manual's Embedding and Stability pages say which entries are a contract. `npm run check:packages` lints every packed tarball with publint and attw (ESM only) before it installs them.
+
+Inside `cli/src`, `run.ts` dispatches to one module per command, `commands/<name>.ts` (the review command's parts in `commands/review/`: `reviewCommand` runs `resolveRun`, then `planRun` or `executeRun`, `writeReport`, `deliver` (publish, upload) and `exitCode`), over shared modules that never import a command: `io/` (output, terminal sanitising, `UsageError`, the `EXIT` codes), `config/`, `cloud/` (ocra Cloud credentials, session, calls), `plugins/` and `session/` (the session store). Argument parsers are named `parse*`, functions that turn arguments into a review target `resolve*`.
 
 ## Roadmap
 

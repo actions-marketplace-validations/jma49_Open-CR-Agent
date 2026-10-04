@@ -1,12 +1,9 @@
 {
-  "extends": "../../tsconfig.base.json",
-  "compilerOptions": {
-    "rootDir": "src",
-    "outDir": "dist"
-  },
-  "include": ["src"],
-  "exclude": ["src/**/*.test.ts", "src/**/*.fakes.ts"],
+  "extends": "../../tsconfig.package.json",
   "references": [
+    {
+      "path": "../cloud-contract"
+    },
     {
       "path": "../core"
     },
@@ -24,6 +21,9 @@
     },
     {
       "path": "../vcs-local"
+    },
+    {
+      "path": "../vcs-platform"
     }
   ]
 }

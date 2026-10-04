@@ -2,26 +2,32 @@ import {
   type AttemptOutcome,
   emptyUsage,
   errorMessage,
+  OcraError,
   parseModel,
   type Usage,
 } from "@open-cr-agent/core";
 import type { OpencodeClient } from "@opencode-ai/sdk/v2";
-import { type SessionMessage, sessionUsage, summarizeSession } from "./session-outcome.js";
+import {
+  parseSessionMessages,
+  type SessionMessage,
+  sessionUsage,
+  summarizeSession,
+} from "./session-outcome.js";
 
 // A session that was cut off has still spent tokens and may have reported
 // findings; this bounds the one extra request that collects them.
-export const HARVEST_TIMEOUT_MS = 5_000;
+const HARVEST_TIMEOUT_MS = 5_000;
 
 // A prompt returns only when the agent is done, so silence on the request is
 // normal; silence in the session is not. A session whose messages have not
 // changed for this long (no new step, no streamed text, no tool progress) is
 // stopped and the task moves to the next model instead of waiting for its
 // full timeout. Generous, so a slow step that is still writing survives.
-export const INACTIVITY_MS = 5 * 60_000;
+const INACTIVITY_MS = 5 * 60_000;
 // Each poll also reports what the session has spent, and a run's spend limit
 // stops running tasks on those reports: this bounds how far past the limit a
 // task can get before it is stopped.
-export const ACTIVITY_POLL_MS = 10_000;
+const ACTIVITY_POLL_MS = 10_000;
 
 export interface ActivityOptions {
   inactivityMs?: number;
@@ -34,6 +40,8 @@ export interface PromptInput {
   title: string;
   agent: string;
   model: string;
+  // The OpenCode variant that carries the agent's effort (effort.ts).
+  variant?: string;
   system: string;
   user: string;
   tools: Record<string, boolean>;
@@ -44,7 +52,7 @@ export interface PromptInput {
   resume?: ResumeOptions;
 }
 
-export interface ResumeOptions {
+interface ResumeOptions {
   doneTool: string;
   maxSteps: number;
   message: string;
@@ -54,7 +62,7 @@ export interface ResumeOptions {
 // with no text, no done tool and steps to spare (2026-09-28), and the task
 // counted as completed with its files unread. Continuing the same session
 // keeps what it read and is cheaper than starting over.
-export function stoppedEarly(outcome: AttemptOutcome, resume: ResumeOptions): boolean {
+function stoppedEarly(outcome: AttemptOutcome, resume: ResumeOptions): boolean {
   return (
     !outcome.toolCalls.includes(resume.doneTool) &&
     outcome.steps < resume.maxSteps &&
@@ -73,7 +81,10 @@ export async function promptSession(
 ): Promise<AttemptOutcome> {
   const created = await session.create({ title: input.title }, { signal });
   if (!created.data) {
-    throw new Error(`OpenCode could not create a session: ${JSON.stringify(created.error)}`);
+    throw new OcraError(
+      "RUNTIME_FAILED",
+      `OpenCode could not create a session: ${JSON.stringify(created.error)}`,
+    );
   }
   const sessionID = created.data.id;
   const stop = () => void session.abort({ sessionID }).catch(() => {});
@@ -86,6 +97,7 @@ export async function promptSession(
         sessionID,
         agent: input.agent,
         model: parseModel(input.model),
+        ...(input.variant ? { variant: input.variant } : {}),
         system: input.system,
         tools: input.tools,
         parts: [{ type: "text", text: input.user }],
@@ -103,11 +115,7 @@ export async function promptSession(
     let outcome: AttemptOutcome;
     try {
       const messages = await session.messages({ sessionID }, { signal: attempt });
-      outcome = summarizeSession(
-        (messages.data ?? []) as SessionMessage[],
-        reportTool,
-        input.toolPrefix,
-      );
+      outcome = summarizeSession(parseSessionMessages(messages.data), reportTool, input.toolPrefix);
     } catch (error) {
       // The session finished; running it again on the next model would pay
       // twice. Keep what one more read gets, and do not retry.
@@ -125,6 +133,7 @@ export async function promptSession(
         sessionID,
         agent: input.agent,
         model: parseModel(input.model),
+        ...(input.variant ? { variant: input.variant } : {}),
         system: input.system,
         tools: input.tools,
         parts: [{ type: "text", text: input.resume.message }],
@@ -179,7 +188,7 @@ function watchActivity(
         { sessionID },
         { signal: AbortSignal.timeout(HARVEST_TIMEOUT_MS) },
       );
-      const list = (messages.data ?? []) as SessionMessage[];
+      const list = parseSessionMessages(messages.data);
       if (options.onUsage) {
         const spent = sessionUsage(list);
         if (spent.costUsd > reported.costUsd || spent.inputTokens > reported.inputTokens) {
@@ -205,7 +214,7 @@ function watchActivity(
 }
 
 // What changes while an agent works: steps, parts, streamed text, tool states.
-export function activitySignature(messages: readonly SessionMessage[]): string {
+function activitySignature(messages: readonly SessionMessage[]): string {
   return messages
     .map((m) =>
       m.parts.map((p) => `${p.type}:${p.state?.status ?? ""}:${p.text?.length ?? 0}`).join(","),
@@ -224,12 +233,12 @@ async function harvest(
       { sessionID },
       { signal: AbortSignal.timeout(HARVEST_TIMEOUT_MS) },
     );
-    return summarizeSession((messages.data ?? []) as SessionMessage[], reportTool, toolPrefix);
+    return summarizeSession(parseSessionMessages(messages.data), reportTool, toolPrefix);
   } catch {
     return emptyOutcome();
   }
 }
 
-export function emptyOutcome(): AttemptOutcome {
+function emptyOutcome(): AttemptOutcome {
   return { findings: [], steps: 0, toolCalls: [], text: "", usage: emptyUsage() };
 }

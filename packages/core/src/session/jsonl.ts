@@ -9,9 +9,11 @@ import {
   writeSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
-import { serializeOutput, toReportOutput } from "../pipeline/output.js";
-import type { ReviewEvent } from "../pipeline/report.js";
+import { isNotFound, OcraError } from "../errors.js";
 import { newRunId } from "../pipeline/run-id.js";
+import { toReportOutput } from "../report/output.js";
+import type { ReviewEvent } from "../report/report.js";
+import { serializeOutput } from "../report/serialize.js";
 
 export const EVENTS_FILE = "events.jsonl";
 export const REPORT_FILE = "report.json";
@@ -21,10 +23,10 @@ export const REPORT_FILE = "report.json";
 export class JsonlSessionWriter {
   readonly dir: string;
 
-  constructor(
-    sessionsDir: string,
-    readonly id: string = newRunId(),
-  ) {
+  readonly id: string;
+
+  constructor(sessionsDir: string, id: string = newRunId()) {
+    this.id = id;
     // The sessions directory lives in the reviewed tree, which may carry
     // links planted to send the logs, or the .gitignore write, elsewhere.
     for (const dir of [dirname(sessionsDir), sessionsDir]) refuseSymlink(dir);
@@ -56,9 +58,12 @@ export class JsonlSessionWriter {
 function refuseSymlink(path: string): void {
   try {
     if (lstatSync(path).isSymbolicLink()) {
-      throw new Error(`Refusing to write the session log through the symbolic link ${path}`);
+      throw new OcraError(
+        "ACCESS_DENIED",
+        `Refusing to write the session log through the symbolic link ${path}`,
+      );
     }
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    if (!isNotFound(error)) throw error;
   }
 }

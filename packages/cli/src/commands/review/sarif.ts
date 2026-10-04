@@ -1,0 +1,240 @@
+import {
+  coverageGaps,
+  type Finding,
+  type FindingFix,
+  type PriorFinding,
+  type ReviewReport,
+  type Severity,
+} from "@open-cr-agent/core";
+import { serializeOutput } from "@open-cr-agent/core/internal";
+
+// `--format sarif`: the review as a SARIF 2.1.0 log, for code scanning and
+// security dashboards. One rule per reviewer category, one result per
+// finding. Findings an earlier review reported in files this run did not
+// review again stay open, so they are results too, marked unchanged.
+// https://docs.oasis-open.org/sarif/sarif/v2.1.0/sarif-v2.1.0.html
+
+const SCHEMA = "https://json.schemastore.org/sarif-2.1.0.json";
+const LEVEL: Record<Severity, SarifLevel> = {
+  critical: "error",
+  warning: "warning",
+  suggestion: "note",
+};
+
+type SarifLevel = "error" | "warning" | "note";
+
+interface SarifMessage {
+  text: string;
+}
+
+interface SarifResult {
+  ruleId: string;
+  ruleIndex: number;
+  level: SarifLevel;
+  message: SarifMessage;
+  locations: {
+    physicalLocation: {
+      artifactLocation: ArtifactLocation;
+      region?: { startLine: number; endLine: number };
+    };
+  }[];
+  partialFingerprints: Record<string, string>;
+  baselineState?: "new" | "unchanged";
+  fixes?: SarifFix[];
+  properties: Record<string, unknown>;
+}
+
+interface SarifRegion {
+  startLine: number;
+  startColumn?: number;
+  endLine: number;
+  endColumn?: number;
+}
+
+interface SarifFix {
+  description: SarifMessage;
+  artifactChanges: {
+    artifactLocation: ArtifactLocation;
+    replacements: { deletedRegion: SarifRegion; insertedContent: { text: string } }[];
+  }[];
+}
+
+interface ArtifactLocation {
+  uri: string;
+  uriBaseId: "%SRCROOT%";
+}
+
+export function renderSarif(report: ReviewReport, version: string): string {
+  return `${serializeOutput(sarifLog(report, version))}\n`;
+}
+
+export function sarifLog(report: ReviewReport, version: string) {
+  const open = [
+    ...(report.rereview?.unchanged ?? []),
+    ...(report.rereview?.notReproduced ?? []),
+    ...(report.rereview?.notRechecked ?? []),
+  ];
+  const categories = [
+    ...new Set([...report.findings.map((f) => f.category), ...(open.length > 0 ? [CARRIED] : [])]),
+  ].sort();
+  const index = new Map(categories.map((c, i) => [c, i]));
+  const { notReviewed } = coverageGaps(report);
+  const log = {
+    $schema: SCHEMA,
+    version: "2.1.0",
+    runs: [
+      {
+        automationDetails: { id: `ocra/${report.runId}` },
+        tool: {
+          driver: {
+            name: "ocra",
+            informationUri: "https://ocracloud.com",
+            version,
+            semanticVersion: version,
+            rules: categories.map((id) => ({
+              id,
+              name: id,
+              shortDescription: {
+                text:
+                  id === CARRIED
+                    ? CARRIED_DESCRIPTION
+                    : `Findings of the ${id} reviewer or analyzer`,
+              },
+              properties: { tags: [id] },
+            })),
+          },
+        },
+        invocations: [
+          {
+            executionSuccessful: notReviewed === 0 && report.unverifiedCriticals === 0,
+            toolExecutionNotifications: [
+              ...(notReviewed > 0
+                ? [
+                    {
+                      level: "warning",
+                      message: { text: `${notReviewed} selected file(s) were not reviewed` },
+                    },
+                  ]
+                : []),
+              ...report.warnings.map((w) => ({
+                level: "warning",
+                message: { text: plainText(w) },
+              })),
+            ],
+          },
+        ],
+        results: [
+          ...report.findings.map((f) => fromFinding(f, index)),
+          ...open.map((f) => fromPrior(f, index)),
+        ],
+        properties: {
+          verdict: report.verdict,
+          tier: report.tier,
+          baseSha: report.changeRequest.baseSha,
+          headSha: report.changeRequest.headSha,
+          notReviewed: report.coverage
+            .filter((c) => c.status === "failed" || c.status === "unreviewed")
+            .map((c) => c.path),
+          unverifiedCriticals: report.unverifiedCriticals,
+          costUsd: report.usage.costUsd,
+        },
+      },
+    ],
+  };
+  return log;
+}
+
+// Open findings an earlier review reported, carried over under their own
+// rule: their reviewer category is not recorded in the review state.
+const CARRIED = "ocra-carried-over";
+const CARRIED_DESCRIPTION =
+  "Findings an earlier review reported that are still open in files this run did not review again";
+
+function fromFinding(f: Finding, index: ReadonlyMap<string, number>): SarifResult {
+  const text = [f.title, f.body, ...(f.suggestion ? [`Suggestion: ${f.suggestion}`] : [])].join(
+    "\n\n",
+  );
+  return {
+    ruleId: f.category,
+    ruleIndex: index.get(f.category) ?? 0,
+    level: LEVEL[f.severity],
+    message: { text: plainText(text) },
+    locations: [location(f.file, f.lineRange)],
+    partialFingerprints: { "ocra/v1": f.fingerprint },
+    ...(f.fix ? { fixes: [fix(f.file, f.fix)] } : {}),
+    properties: {
+      reviewer: f.reviewer,
+      severity: f.severity,
+      verification: f.verification ?? "unchecked",
+      status: f.status === "unfixed" ? "unfixed" : "new",
+      ...(f.lowConfidence ? { lowConfidence: true } : {}),
+      task: f.provenance.task,
+      ...(f.provenance.model === undefined ? {} : { model: f.provenance.model }),
+    },
+  };
+}
+
+function fromPrior(f: PriorFinding, index: ReadonlyMap<string, number>): SarifResult {
+  return {
+    ruleId: CARRIED,
+    ruleIndex: index.get(CARRIED) ?? 0,
+    level: LEVEL[f.severity],
+    message: { text: plainText(f.title) },
+    // The review state keeps no lines for them, so they apply to the file.
+    locations: [location(f.file)],
+    partialFingerprints: { "ocra/v1": f.fingerprint },
+    baselineState: "unchanged",
+    properties: { severity: f.severity, verification: f.verification ?? "unchecked" },
+  };
+}
+
+function location(file: string, lines?: { start: number; end: number }) {
+  return {
+    physicalLocation: {
+      artifactLocation: artifactLocation(file),
+      ...(lines ? { region: { startLine: lines.start, endLine: lines.end } } : {}),
+    },
+  };
+}
+
+// Each segment percent-encoded: a path may hold "#", "?" or spaces, which a
+// URI would read as a fragment, a query or an error.
+function artifactLocation(file: string): ArtifactLocation {
+  return { uri: file.split("/").map(encodeURIComponent).join("/"), uriBaseId: "%SRCROOT%" };
+}
+
+// The inserted text is code and goes in as written: it is content to apply,
+// not a message a viewer renders. A region without columns ends before the
+// last line's newline (SARIF 3.30), which a replacement keeps; a deletion
+// runs to the start of the next line instead, so no empty line is left.
+function fix(file: string, f: FindingFix): SarifFix {
+  const deletedRegion: SarifRegion =
+    f.replacement === ""
+      ? { startLine: f.startLine, startColumn: 1, endLine: f.endLine + 1, endColumn: 1 }
+      : { startLine: f.startLine, endLine: f.endLine };
+  return {
+    description: { text: "Replace the lines with the suggested code" },
+    artifactChanges: [
+      {
+        artifactLocation: artifactLocation(file),
+        replacements: [{ deletedRegion, insertedContent: { text: f.replacement } }],
+      },
+    ],
+  };
+}
+
+// SARIF viewers turn "[text](target)" in a message into a link (SARIF
+// 3.11.6), and some turn bare web addresses into links too. Text from a
+// reviewed change or a model must do neither: every backslash and bracket is
+// escaped, backslashes first so a planted "\[" cannot undo the escape, and
+// web addresses get a zero-width space in their scheme or after "www", as in
+// pull request comments (vcs-platform's safeMarkdown, which also handles
+// markup SARIF text does not have). Braces are doubled, since "{0}" is a
+// placeholder (SARIF 3.11.5); GitHub shows "{{" as "{".
+export function plainText(text: string): string {
+  return text
+    .replace(/[\\[\]]/g, (c) => `\\${c}`)
+    .replace(/[{}]/g, (c) => c + c)
+    .replace(/\b(https?|ftp)(?=:\/\/)/gi, "$1​")
+    .replace(/\bwww(?=\.)/gi, "www​");
+}

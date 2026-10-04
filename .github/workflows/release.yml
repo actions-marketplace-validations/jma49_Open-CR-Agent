@@ -4,7 +4,7 @@ name: Release
 # npm trusted publishing: no npm token is stored anywhere, and npm attaches
 # provenance. Versions the registry already has are skipped, so re-running a
 # failed run resumes it, and the release of a version published by hand (the
-# first one, see docs/releasing.md) passes.
+# first one, see the maintainers' release runbook) passes.
 # A dry run by hand: gh workflow run release.yml --ref main
 
 on:
@@ -80,10 +80,12 @@ jobs:
         with:
           name: packages
           path: packed
+      # The linters check-packages runs on each tarball (publint, attw).
+      - run: npm ci --ignore-scripts --no-audit --no-fund
       - run: node scripts/check-packages.mjs --tarballs packed
 
   # Can mint a publish token, so it installs nothing and runs no code but npm
-  # and scripts/release.mjs, which has no dependencies.
+  # and scripts/release.mjs, which needs no installed package.
   publish:
     needs: [pack, check]
     runs-on: ubuntu-latest
@@ -143,6 +145,7 @@ jobs:
           # The registry can take minutes to serve a version it just accepted,
           # longer for some packages than others (0.2.0 waited on three while
           # cli was served), and the image installs every one of them.
+          # shellcheck disable=SC2016 # JavaScript, not shell, expands ${…} here
           packages=$(node -e 'const fs = require("fs"); for (const d of fs.readdirSync("packages")) { const j = JSON.parse(fs.readFileSync(`packages/${d}/package.json`)); if (!j.private) console.log(j.name); }')
           for _ in $(seq 1 60); do
             missing=""

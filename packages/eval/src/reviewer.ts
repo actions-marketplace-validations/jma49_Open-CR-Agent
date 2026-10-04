@@ -1,9 +1,11 @@
-import { readFile, rm } from "node:fs/promises";
+import { readFileSync } from "node:fs";
+import { rm } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
-import type { ReportOutput } from "@open-cr-agent/core";
-import type { Instance } from "./dataset.js";
-import { exec } from "./exec.js";
+import { errorMessage, type ReportOutput } from "@open-cr-agent/core";
+import { readReport } from "@open-cr-agent/core/internal";
+import { benchmarkEnv, exec } from "./exec.js";
+import type { Instance } from "./instance.js";
 
 export interface ReviewOutcome {
   exitCode: number;
@@ -12,9 +14,16 @@ export interface ReviewOutcome {
   error?: string;
 }
 
+// The built CLI, found through the package's own bin entry: the package
+// entry is dist/index.js for users but src/index.ts under the tests' source
+// condition, and either way sits one level below the package root.
 export function defaultOcraCommand(): string[] {
   const entry = createRequire(import.meta.url).resolve("@open-cr-agent/cli");
-  return [process.execPath, join(dirname(entry), "main.js")];
+  const root = dirname(dirname(entry));
+  const { bin } = JSON.parse(readFileSync(join(root, "package.json"), "utf8")) as {
+    bin: { ocra: string };
+  };
+  return [process.execPath, join(root, bin.ocra)];
 }
 
 // Runs the real CLI as a black box, like the official adapters for other
@@ -47,19 +56,24 @@ export async function reviewInstance(
       "--no-repo-config",
       ...(options.reviewArgs ?? []),
     ],
-    { cwd: repoDir, timeoutMs: options.timeoutMs },
+    { cwd: repoDir, timeoutMs: options.timeoutMs, env: benchmarkEnv() },
   );
   const durationMs = Date.now() - started;
 
+  // A run that failed (exit code 2) writes no report; otherwise a report
+  // that cannot be read says why in the outcome.
   let report: ReportOutput | undefined;
+  let unreadable: string | undefined;
   try {
-    report = JSON.parse(await readFile(outputPath, "utf8")) as ReportOutput;
-  } catch {}
+    report = await readReport(outputPath);
+  } catch (error) {
+    unreadable = errorMessage(error);
+  }
   const outcome: ReviewOutcome = { exitCode: result.exitCode, durationMs };
   if (report) outcome.report = report;
   if (result.timedOut) outcome.error = `timed out after ${Math.round(options.timeoutMs / 1000)}s`;
   else if (!report || result.exitCode === 2)
-    outcome.error = lastLines(result.stderr) || `exit code ${result.exitCode}`;
+    outcome.error = lastLines(result.stderr) || unreadable || `exit code ${result.exitCode}`;
   return outcome;
 }
 

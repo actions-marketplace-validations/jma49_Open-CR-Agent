@@ -1,6 +1,6 @@
 {
   "name": "@open-cr-agent/runtime-opencode",
-  "version": "0.2.0",
+  "version": "0.5.0",
   "description": "OpenCode-based agent runtime for Open-CR-Agent",
   "keywords": [
     "code-review",
@@ -8,7 +8,7 @@
     "agents"
   ],
   "license": "Apache-2.0",
-  "homepage": "https://ocra.majincheng.com",
+  "homepage": "https://ocracloud.com",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/jma49/Open-CR-Agent.git",
@@ -19,11 +19,14 @@
     "node": ">=22.19"
   },
   "type": "module",
+  "sideEffects": false,
   "exports": {
     ".": {
+      "@open-cr-agent/source": "./src/index.ts",
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
-    }
+    },
+    "./package.json": "./package.json"
   },
   "files": [
     "dist",
@@ -31,7 +34,7 @@
   ],
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.1",
-    "@open-cr-agent/core": "0.2.0",
+    "@open-cr-agent/core": "0.5.0",
     "@opencode-ai/sdk": "1.18.32",
     "opencode-ai": "1.18.32",
     "undici": "^8.11.2",

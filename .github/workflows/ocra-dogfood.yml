@@ -6,22 +6,39 @@
 # edit its own copy of this file or of the caller, but a copy at its own ref
 # gets no credential, and the caller passes nothing that moves the budget: the
 # switch and the budget are repository variables, read here.
+#
+# With model-source "openrouter" a caller reviews on OpenRouter's free model
+# instead, through the direct runtime and the caller's OPENROUTER_API_KEY: no
+# Google credential, no dollar ledger (the model costs $0), and a task cap in
+# place of the budget, since the limit there is the account's 1000 free
+# requests a UTC day. The configuration is written here, outside the
+# checkout, and passed with --config: nothing in it comes from the pull
+# request.
 name: ocra dogfood
 
 on:
   workflow_call:
+    inputs:
+      model-source:
+        description: Where the models come from, vertex (default) or openrouter.
+        type: string
+        default: vertex
     secrets:
       # Secrets rather than variables: the job log of a public repository
       # would show a variable's value, and these name the Vertex project.
+      # Required with model-source vertex.
       GCP_WIF_PROVIDER:
         description: Full resource name of the Workload Identity provider.
-        required: true
+        required: false
       GCP_SERVICE_ACCOUNT:
         description: Email of the service account that may call Vertex AI models.
-        required: true
+        required: false
       GOOGLE_VERTEX_PROJECT:
         description: Google Cloud project that serves Vertex AI.
-        required: true
+        required: false
+      OPENROUTER_API_KEY:
+        description: OpenRouter key, required with model-source openrouter.
+        required: false
 
 permissions: {}
 
@@ -57,82 +74,42 @@ jobs:
       # UTC day may start reviews with.
       CAP_USD: "2"
       DAILY_USD: "2"
+      SOURCE: ${{ inputs.model-source }}
+      # The free model, in this one place; swap it when the preview ends.
+      FREE_MODEL: stealth/space-bunny-alpha
+      # Review tasks one review may start on the free model: a task takes 30
+      # to 70 requests, so a review stays within a few hundred of the day's
+      # 1000. Files past the cap are reported as not reviewed.
+      FREE_MAX_TASKS: "8"
+      # Requests the day must have left before a review starts.
+      FREE_MIN_REQUESTS: "40"
     steps:
+      # How many of the day's free requests are left (the action brings its
+      # script along: this job has no checkout of this repository). Empty
+      # when OpenRouter does not say; then the review runs and a spent quota
+      # shows in its report.
+      - id: free
+        if: inputs.model-source == 'openrouter'
+        uses: jma49/Open-CR-Agent/.github/actions/free-quota@main
+        with:
+          model: ${{ env.FREE_MODEL }}
+          api-key: ${{ secrets.OPENROUTER_API_KEY }}
       - id: guard
-        shell: bash
+        uses: jma49/Open-CR-Agent/.github/actions/dogfood@main
         env:
+          FREE_LEFT: ${{ steps.free.outputs.left }}
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
           SWITCH: ${{ vars.OCRA_REVIEW }}
           BUDGET_USD: ${{ vars.OCRA_REVIEW_BUDGET_USD }}
-        run: |
-          set -euo pipefail
-          cents() {
-            if ! [[ "$1" =~ ^[0-9]+(\.[0-9]{1,2})?$ ]]; then
-              echo "::error::not a dollar amount: '$1'"
-              exit 1
-            fi
-            awk -v d="$1" 'BEGIN { printf "%d", d * 100 + 0.5 }'
-          }
-          usd() { awk -v c="$1" 'BEGIN { printf "$%.2f", c / 100 }'; }
-          budget=$(cents "$BUDGET_USD")
-          daily=$(cents "$DAILY_USD")
-          cap=$(cents "$CAP_USD")
-          # ocra stops running review tasks at its limit, but what they spend
-          # between two reports and their steps in progress can still pass
-          # it. Half the cap again covers that with room to spare.
-          reserve=$((cap * 3 / 2))
-
-          listing=$(gh api --paginate "repos/$REPOSITORY/actions/artifacts?per_page=100" \
-            --jq '.artifacts[] | select(.name | startswith("ocra-cost-")) | "\(.created_at[0:10]) \(.name)"')
-          today=$(date -u +%F)
-          # A name the steps below did not write counts as a full reservation.
-          read -r spent spent_today runs < <(printf '%s\n' "$listing" |
-            awk -v today="$today" -v reserve="$reserve" '
-              NF < 2 { next }
-              $2 ~ /^ocra-cost-[0-9]+-[0-9]+-[cr][0-9]+$/ {
-                split($2, part, "-")
-                key = part[3] "-" part[4]
-                if (substr(part[5], 1, 1) == "c") { done[key] = substr(part[5], 2) + 0; doneDay[key] = $1 }
-                else { held[key] = substr(part[5], 2) + 0; heldDay[key] = $1 }
-                next
-              }
-              { spent += reserve; runs++; if ($1 == today) spentToday += reserve }
-              END {
-                for (key in done) { spent += done[key]; runs++; if (doneDay[key] == today) spentToday += done[key] }
-                for (key in held) if (!(key in done)) { spent += held[key]; runs++; if (heldDay[key] == today) spentToday += held[key] }
-                printf "%d %d %d\n", spent, spentToday, runs
-              }')
-
-          allowed=true
-          if [ "$SWITCH" != on ]; then
-            allowed=false
-            reason="reviews are off (OCRA_REVIEW is '$SWITCH')"
-          elif [ $((spent + reserve)) -gt "$budget" ]; then
-            allowed=false
-            reason="the budget of $(usd "$budget") is spent: $(usd "$spent") over $runs review(s), and one more may cost $(usd "$reserve")"
-          elif [ "$spent_today" -ge "$daily" ]; then
-            allowed=false
-            reason="today's $(usd "$daily") is spent ($(usd "$spent_today")); reviews start again tomorrow (UTC)"
-          fi
-          echo "allowed=$allowed" >> "$GITHUB_OUTPUT"
-          echo "reserve=$reserve" >> "$GITHUB_OUTPUT"
-          {
-            echo "### ocra dogfood budget"
-            echo
-            echo "Spent $(usd "$spent") of $(usd "$budget") over $runs review(s), $(usd "$spent_today") of today's $(usd "$daily")."
-            echo
-            if [ "$allowed" = true ]; then
-              echo "Review allowed, capped at $(usd "$cap")."
-            else
-              echo "**No review:** $reason."
-            fi
-          } >> "$GITHUB_STEP_SUMMARY"
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        with:
+          step: guard
 
       # The reservation goes into the ledger before anything can be spent; if
       # it cannot be recorded, the job stops here.
       - id: reserve
-        if: steps.guard.outputs.allowed == 'true'
+        if: steps.guard.outputs.allowed == 'true' && steps.guard.outputs.reserve != ''
         shell: bash
         env:
           RESERVE_CENTS: ${{ steps.guard.outputs.reserve }}
@@ -143,12 +120,12 @@ jobs:
           jq -n --argjson cents "$RESERVE_CENTS" '{reservedUsd: ($cents / 100)}' > "$RUNNER_TEMP/ocra-reserve.json"
           echo "name=ocra-cost-$RUN_ID-$RUN_ATTEMPT-r$RESERVE_CENTS" >> "$GITHUB_OUTPUT"
 
-      - if: steps.guard.outputs.allowed == 'true'
+      - if: steps.reserve.outputs.name != ''
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ${{ steps.reserve.outputs.name }}
           path: ${{ runner.temp }}/ocra-reserve.json
-          # The Vertex trial ends on 2026-12-27; the ledger must outlive it.
+          # The ledger must outlive the model credit it tracks.
           retention-days: 90
           if-no-files-found: error
 
@@ -161,7 +138,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - if: steps.guard.outputs.allowed == 'true'
+      - if: steps.guard.outputs.allowed == 'true' && env.SOURCE == 'vertex'
         uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
         with:
           workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
@@ -175,8 +152,8 @@ jobs:
 
       # Advice only: a failed or incomplete review never fails the pull request.
       - id: review
-        if: steps.guard.outputs.allowed == 'true'
-        uses: jma49/Open-CR-Agent@121f4ce23ca2b263bd3d24a23c910bd7b8c7530e # v0.2.0
+        if: steps.guard.outputs.allowed == 'true' && env.SOURCE == 'vertex'
+        uses: jma49/Open-CR-Agent@d3af4e2189007de77dcf17e736855d04be4a491c # v0.5.0
         continue-on-error: true
         env:
           GOOGLE_VERTEX_PROJECT: ${{ secrets.GOOGLE_VERTEX_PROJECT }}
@@ -187,39 +164,69 @@ jobs:
         with:
           args: --max-cost-usd ${{ env.CAP_USD }}
 
+      # Written by this file at main, outside the checkout, and passed with
+      # --config, which replaces the base commit's .ocra/config.json: the
+      # runtime, the endpoint and the key's variable name never come from the
+      # pull request. No OCRA_MODEL_* variable is set, since those would win
+      # over the file's models.
+      - name: Write the free model configuration
+        if: steps.guard.outputs.allowed == 'true' && env.SOURCE == 'openrouter'
+        shell: bash
+        run: |
+          set -euo pipefail
+          jq -n --arg model "$FREE_MODEL" --argjson maxTasks "$FREE_MAX_TASKS" '{
+            runtime: "direct",
+            maxTasks: $maxTasks,
+            models: { top: ["router/\($model)"], standard: ["router/\($model)"], light: ["router/\($model)"] },
+            providers: {
+              router: {
+                type: "openai-compatible",
+                baseUrl: "https://openrouter.ai/api/v1",
+                apiKeyEnv: "OPENROUTER_API_KEY",
+                models: { ($model): { input: 0, output: 0 } }
+              }
+            }
+          }' > "$RUNNER_TEMP/ocra-free.json"
+
+      # Advice only, as above.
+      - id: review-free
+        if: steps.guard.outputs.allowed == 'true' && env.SOURCE == 'openrouter'
+        uses: jma49/Open-CR-Agent@d3af4e2189007de77dcf17e736855d04be4a491c # v0.5.0
+        continue-on-error: true
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        with:
+          opencode: false
+          args: --config ${{ runner.temp }}/ocra-free.json
+
+      # A day whose free requests ran out fails every task with HTTP 429 and
+      # ocra exits 2 (or 3, when some tasks finished first). That is a
+      # skipped review, not a broken one: say so instead of leaving a failed
+      # step to read. ocra has already posted the review as incomplete.
+      - id: free-outcome
+        name: Read the free model outcome
+        if: always() && steps.review-free.outcome != '' && steps.review-free.outcome != 'skipped'
+        uses: jma49/Open-CR-Agent/.github/actions/dogfood@main
+        env:
+          EXIT_CODE: ${{ steps.review-free.outputs.exit-code }}
+          REPORT: ${{ steps.review-free.outputs.report }}
+        with:
+          step: free-outcome
+
       # Runs after a failure or a cancellation too: ocra writes its report,
       # partial or not, before it exits. A review that ran and left no
       # readable report is counted at its cap.
       - id: cost
         if: always() && steps.reserve.outputs.name != ''
-        shell: bash
+        uses: jma49/Open-CR-Agent/.github/actions/dogfood@main
         env:
           REVIEW_OUTCOME: ${{ steps.review.outcome }}
           RUN_ID: ${{ github.run_id }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
           PULL_REQUEST: ${{ github.event.pull_request.number }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: |
-          set -euo pipefail
-          cap=$(awk -v d="$CAP_USD" 'BEGIN { printf "%d", d * 100 + 0.5 }')
-          report=$(find .ocra/sessions -name report.json -type f -newer "$RUNNER_TEMP/ocra-review-start" 2>/dev/null | head -n 1 || true)
-          if [ -n "$report" ] && cents=$(jq -e '((.usage.costUsd // 0) * 100) | ceil' "$report" 2>/dev/null) &&
-            [[ "$cents" =~ ^[0-9]+$ ]]; then
-            source="report"
-          elif [ -n "$report" ]; then
-            cents=$cap
-            source="unreadable report, counted at the cap"
-          elif [ -z "$REVIEW_OUTCOME" ] || [ "$REVIEW_OUTCOME" = "skipped" ]; then
-            cents=0
-            source="no review ran"
-          else
-            cents=$cap
-            source="no report, counted at the cap"
-          fi
-          jq -n --argjson cents "$cents" --arg source "$source" --arg pr "$PULL_REQUEST" --arg head "$HEAD_SHA" \
-            '{costUsd: ($cents / 100), source: $source, pullRequest: $pr, head: $head}' > "$RUNNER_TEMP/ocra-cost.json"
-          echo "name=ocra-cost-$RUN_ID-$RUN_ATTEMPT-c$cents" >> "$GITHUB_OUTPUT"
-          echo "Recorded $(awk -v c="$cents" 'BEGIN { printf "$%.2f", c / 100 }') ($source)." >> "$GITHUB_STEP_SUMMARY"
+        with:
+          step: cost
 
       - if: always() && steps.cost.outputs.name != ''
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

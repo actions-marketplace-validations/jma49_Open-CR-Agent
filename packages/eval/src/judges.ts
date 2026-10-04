@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { readFile, writeFile } from "node:fs/promises";
+import { proxiedFetch } from "@open-cr-agent/core";
 import type { SemanticJudge } from "./match.js";
 
 export interface JudgeConfig {
@@ -9,7 +10,7 @@ export interface JudgeConfig {
 }
 
 export const GEMINI_OPENAI_URL = "https://generativelanguage.googleapis.com/v1beta/openai";
-export const DEFAULT_JUDGE_MODEL = "gemini-flash-lite-latest";
+const DEFAULT_JUDGE_MODEL = "gemini-flash-lite-latest";
 
 // Same variable names as the official AACR-Bench evaluation; falls back to a
 // Gemini key through Google's OpenAI-compatible endpoint.
@@ -29,7 +30,7 @@ export function judgeConfigFromEnv(
     : undefined;
 }
 
-export function judgePrompt(reference: string, generated: string): string {
+function judgePrompt(reference: string, generated: string): string {
   const task =
     'Determine whether two given review comments express the same concern or suggestion. Ignore differences in wording, tone, or formatting—focus solely on semantic equivalence of the underlying issue. If the core intent and technical substance are identical, answer "yes"; otherwise, answer "no".';
   return [
@@ -66,10 +67,13 @@ export function parseJudgeAnswer(answer: string): boolean {
 export class OpenAICompatibleJudge implements SemanticJudge {
   calls = 0;
 
-  constructor(
-    private readonly config: JudgeConfig,
-    private readonly fetchImpl: typeof fetch = fetch,
-  ) {}
+  private readonly config: JudgeConfig;
+  private readonly fetchImpl: typeof fetch;
+
+  constructor(config: JudgeConfig, fetchImpl: typeof fetch = fetch) {
+    this.config = config;
+    this.fetchImpl = fetchImpl;
+  }
 
   async sameIssue(reference: string, generated: string): Promise<boolean> {
     this.calls += 1;
@@ -110,10 +114,13 @@ export class MockJudge implements SemanticJudge {
 export class CachedJudge implements SemanticJudge {
   private cache = new Map<string, boolean>();
 
-  constructor(
-    private readonly inner: SemanticJudge,
-    private readonly path: string,
-  ) {}
+  private readonly inner: SemanticJudge;
+  private readonly path: string;
+
+  constructor(inner: SemanticJudge, path: string) {
+    this.inner = inner;
+    this.path = path;
+  }
 
   async load(): Promise<void> {
     try {
@@ -146,4 +153,30 @@ export class CachedJudge implements SemanticJudge {
 
 function words(text: string): Set<string> {
   return new Set(text.toLowerCase().match(/[a-z_]{3,}/g) ?? []);
+}
+
+export interface JudgeSetup {
+  judge: SemanticJudge;
+  cacheFile: string;
+  description: string;
+}
+
+export function createJudge(mock: boolean, env: NodeJS.ProcessEnv): JudgeSetup {
+  if (mock) {
+    return {
+      judge: new MockJudge(),
+      cacheFile: "judge-cache.mock.json",
+      description: "mock (word overlap, not comparable)",
+    };
+  }
+  const config = judgeConfigFromEnv(env);
+  if (!config)
+    throw new Error(
+      "No judge configured: set JUDGE_API_KEY or GEMINI_API_KEY, or pass --mock-judge",
+    );
+  return {
+    judge: new OpenAICompatibleJudge(config, proxiedFetch(env)),
+    cacheFile: `judge-cache.${config.model.replace(/[^\w.-]/g, "_")}.json`,
+    description: `${config.model} via ${config.baseUrl}`,
+  };
 }

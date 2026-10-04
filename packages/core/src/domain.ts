@@ -5,10 +5,10 @@ export type Severity = z.infer<typeof severitySchema>;
 
 // A finding in a report is new or reported before; fixed and dismissed
 // earlier findings are listed separately (report.rereview).
-export const findingStatusSchema = z.enum(["new", "unfixed"]);
+const findingStatusSchema = z.enum(["new", "unfixed"]);
 export type FindingStatus = z.infer<typeof findingStatusSchema>;
 
-export const lineRangeSchema = z.object({
+const lineRangeSchema = z.object({
   start: z.number().int().positive(),
   end: z.number().int().positive(),
 });
@@ -49,6 +49,16 @@ export interface FindingProvenance {
   model?: string;
 }
 
+// A replacement for whole lines of the new file, which a platform offers as
+// a committable suggestion (ADR-0029). The replacement is the lines' text
+// joined by "\n", without a trailing newline; empty deletes them. Only a
+// deterministic stage sets it, for exactly the finding's anchored lines.
+export interface FindingFix {
+  startLine: number;
+  endLine: number;
+  replacement: string;
+}
+
 export interface Finding extends ReportedFinding {
   id: string;
   fingerprint: string;
@@ -62,6 +72,7 @@ export interface Finding extends ReportedFinding {
   lowConfidence?: boolean;
   // Absent when the finding is not anchored to lines.
   quote?: QuoteSignature;
+  fix?: FindingFix;
   // Set by Verify; absent before it runs, which counts as "unchecked".
   verification?: Verification;
   // Carried from the earlier review when people replied to this finding.
@@ -131,6 +142,9 @@ export interface PriorFinding {
   // it existed; such findings are never judged fixed by their code alone.
   quote?: QuoteSignature;
   verification?: Verification;
+  // The reviewer that reported it, so a fix or a dismissal is credited to it
+  // after the finding itself is gone; absent in state written before it existed.
+  reviewer?: string;
 }
 
 export interface PriorReview {

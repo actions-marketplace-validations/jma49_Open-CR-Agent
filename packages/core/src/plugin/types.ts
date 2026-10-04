@@ -1,19 +1,25 @@
 import type { z } from "zod";
-import type { AgentRuntime, ModelTier, ReviewContext, VcsAdapter } from "../contracts.js";
-import type { ReviewEvent } from "../pipeline/report.js";
+import type { AgentRuntime, ModelChains, ReviewContext, Sampling } from "../contracts.js";
+import type { ReviewEvent } from "../report/report.js";
 import type { ReviewerDefinition } from "../review/reviewer.js";
 import type { RepoRule } from "../rules/repo-rules.js";
+import type { VcsAdapter } from "../vcs.js";
 
 export type Env = Readonly<Record<string, string | undefined>>;
 
-export type ModelChains = { [Tier in ModelTier]?: readonly string[] };
-
 export interface RuntimeOptions {
   models: ModelChains;
+  // Agents' own chains by agent id (ADR-0025), which their calls carry: every
+  // model a call may name besides the tier chains, for a runtime that
+  // prepares its providers before the first call.
+  agentModels?: Readonly<Record<string, readonly string[]>>;
   tools: readonly ToolDefinition[];
   env: Env;
   // Providers declared in configuration, by id, for model chains to name.
   providers?: Readonly<Record<string, CustomProvider>>;
+  // Sent with every model call the runtime can send it with; the runtime's
+  // `sampling` says what it applied.
+  sampling?: Sampling;
 }
 
 // A model provider reached through an OpenAI-compatible API: a self-hosted
@@ -26,6 +32,9 @@ export interface CustomProvider {
   // Prices in US dollars per million tokens, by model id, so reported cost
   // and the spend limit count its use.
   models: Readonly<Record<string, ModelPrice>>;
+  // How the endpoint takes a reasoning effort: OpenAI's `reasoning_effort`
+  // (default), or OpenRouter's `reasoning: { effort }`.
+  effort?: "openai" | "openrouter";
 }
 
 export interface ModelPrice {

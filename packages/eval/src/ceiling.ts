@@ -1,9 +1,10 @@
-import { type FileDiff, type ReviewPreview, RISK_TIERS, type RiskTier } from "@open-cr-agent/core";
-import type { Dataset, Instance, ReferenceComment } from "./dataset.js";
+import type { FileDiff, RiskTier } from "@open-cr-agent/core";
+import { type ReviewPreview, RISK_TIERS } from "@open-cr-agent/core/internal";
+import type { Dataset, Instance, ReferenceComment } from "./instance.js";
 
 // Why an annotated issue can or cannot be found, decided by the deterministic
 // stages alone. It bounds recall before any model is involved.
-export type Reachability =
+type Reachability =
   | "file_excluded"
   | "not_in_change"
   | "no_reviewer"
@@ -12,7 +13,7 @@ export type Reachability =
   | "outside_diff"
   | "reachable";
 
-export const REACHABILITY_ORDER: readonly Reachability[] = [
+const REACHABILITY_ORDER: readonly Reachability[] = [
   "file_excluded",
   "not_in_change",
   "no_reviewer",
@@ -178,7 +179,8 @@ export function renderCeiling(summary: CeilingSummary): string {
   ];
   const excluded = Object.entries(summary.excludedBy);
   if (excluded.length > 0) {
-    lines.push("", "Excluded files by reason: " + excluded.map(([k, v]) => `${k} ${v}`).join(", "));
+    const reasons = excluded.map(([k, v]) => `${k} ${v}`).join(", ");
+    lines.push("", `Excluded files by reason: ${reasons}`);
   }
   lines.push("", "| Category | Issues | Reachable |", "|---|---|---|");
   for (const [category, c] of Object.entries(summary.byCategory).sort(

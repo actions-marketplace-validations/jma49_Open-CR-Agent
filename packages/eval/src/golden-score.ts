@@ -1,9 +1,8 @@
-import { createHash } from "node:crypto";
 import type { OutputFinding, Severity } from "@open-cr-agent/core";
-import type { Instance } from "./dataset.js";
-import type { Adjudication, ForbiddenRange } from "./golden.js";
+import { shortHash } from "@open-cr-agent/core/internal";
+import type { Adjudication, ForbiddenRange, Instance } from "./instance.js";
 import { matchComments, type SemanticJudge } from "./match.js";
-import type { InstanceResult } from "./runner.js";
+import type { InstanceResult } from "./results.js";
 import { toGeneratedComment } from "./score.js";
 
 // A finding as the maintainer sees it when labeling, and as failures list it.
@@ -203,7 +202,7 @@ function casesHash(instances: readonly Instance[]): string {
       golden: i.golden,
     }))
     .sort((a, b) => a.id.localeCompare(b.id));
-  return createHash("sha256").update(JSON.stringify(cases)).digest("hex").slice(0, 16);
+  return shortHash(JSON.stringify(cases));
 }
 
 function toGoldenFinding(caseId: string, finding: OutputFinding): GoldenFinding {

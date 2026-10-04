@@ -3,7 +3,7 @@ import type { AgentRuntime } from "../contracts.js";
 import { CompletionError } from "../errors.js";
 import type { ReviewerDefinition } from "../review/reviewer.js";
 import { finding, patch, runtime, twoFiles, vcs } from "./run.fakes.js";
-import { review } from "./run.js";
+import { review, reviewWithHooks } from "./run.js";
 
 const usage = { inputTokens: 0, outputTokens: 0, reasoningTokens: 0, cachedTokens: 0, costUsd: 0 };
 const reviewer = (id: string): ReviewerDefinition => ({
@@ -22,7 +22,7 @@ describe("review completeness", () => {
       vcs: vcs({}, patch("src/a.ts", "const a = 1;")),
       runtime: done,
       reviewers: [reviewer("correctness"), reviewer("security")],
-      maxTasks: 1,
+      limits: { maxTasks: 1 },
     });
     expect(report.tasks.map((t) => t.reviewer)).toEqual(["correctness"]);
     expect(report.coverage.map((c) => c.status)).toEqual(["unreviewed"]);
@@ -44,8 +44,7 @@ describe("review completeness", () => {
         yield { type: "done", taskId: spec.taskId };
       }),
       reviewers: [reviewer("correctness"), reviewer("security")],
-      verify: false,
-      judge: false,
+      stages: { verify: false, judge: false },
     });
     // The file is not fully reviewed, so the run is incomplete, but the
     // correctness review happened and its finding stands.
@@ -81,13 +80,13 @@ describe("review completeness", () => {
       controller.abort();
       yield { type: "done", taskId: spec.taskId };
     });
-    const report = await review({
+    const report = await reviewWithHooks({
       vcs: vcs({}, many.join("\n")),
       runtime: rt,
       signal: controller.signal,
-      concurrency: 1,
       abortGraceMs: 10,
       bundling: { groupingMinFiles: 100, maxFilesPerBundle: 1, maxBundleChars: 100_000 },
+      limits: { concurrency: 1 },
     });
     expect(rt.specs).toHaveLength(1);
     expect(
@@ -109,7 +108,7 @@ describe("review completeness", () => {
         },
       ],
     });
-    const report = await review({ vcs: adapter, runtime: done, verify: false });
+    const report = await review({ vcs: adapter, runtime: done, stages: { verify: false } });
     expect(report.verdict).toBe("significant_concerns");
     expect(report.summary).toBe("No new issues; 1 earlier finding(s) are still open.");
   });

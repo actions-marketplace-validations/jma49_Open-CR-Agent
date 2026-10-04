@@ -6,9 +6,8 @@ Rules for humans and AI agents working on Open-CR-Agent (`ocra`). This file is a
 
 Open-CR-Agent is an open-source multi-agent code review system. Deterministic engineering (file selection, bundling, rule matching, anchoring) wraps LLM agents that only make judgment calls. See [docs/architecture.md](docs/architecture.md) and the decision records in [docs/adr/](docs/adr/).
 
-- Language: TypeScript (ESM, strict), Node >= 22.19
-- Monorepo: npm workspaces under `packages/`
-- Tests: Vitest (`npm test`) · Types: `npm run typecheck` · Lint/format: Biome (`npm run check`) · All three: `npm run verify`
+- TypeScript (ESM, strict), Node >= 22.19, npm workspaces under `packages/`
+- `npm run verify` runs Biome (`check`), `typecheck`, the API reports (`check:api`), `knip` and every test. `npm run test:unit` is the fast loop; a test that spawns processes or real git is a `*.e2e.test.ts`
 
 | Package | Responsibility |
 |---|---|
@@ -19,10 +18,11 @@ Open-CR-Agent is an open-source multi-agent code review system. Deterministic en
 | `@open-cr-agent/vcs-github` | `VcsAdapter` for GitHub pull requests, over `vcs-platform` |
 | `@open-cr-agent/vcs-gitlab` | `VcsAdapter` for GitLab merge requests, over `vcs-platform` |
 | `@open-cr-agent/vcs-local` | `VcsAdapter` for the local git repository (workspace, range, commit) |
+| `@open-cr-agent/cloud-contract` | The wire contract with ocra Cloud: Zod schemas, limits, vocabularies, error codes, the redaction pass and its test vectors |
 | `@open-cr-agent/cli` | The `ocra` command |
 | `@open-cr-agent/eval` | Benchmark replay (AACR-Bench) and quality metrics |
 
-`core` depends on nothing inside the repo. Adapters depend only on `core`, and platform adapters also on `vcs-platform`, where the rules of the review conversation live once (ADR-0016). Only `cli` wires concrete adapters together.
+`core` depends on nothing inside the repo. Adapters depend only on `core`, and platform adapters also on `vcs-platform`, where the rules of the review conversation live once (ADR-0016). Only `cli` wires concrete adapters together. `cloud-contract` depends only on Zod, so ocra Cloud can use it as is.
 
 ## Core engineering principles
 
@@ -37,11 +37,11 @@ Open-CR-Agent is an open-source multi-agent code review system. Deterministic en
 9. **Verifiable, observable, reversible changes.** Every change keeps behavior testable, runtime state observable and failures diagnosable, with backward compatibility and a rollback path considered. Errors and logs keep diagnostic context without leaking sensitive data.
 10. **Delete rather than keep compatibility.** When refactoring internal paths, delete obsolete implementations directly; do not add compatibility layers, deprecated shims or dual-write logic. Compatibility of external contracts (CLI flags, config file format, plugin interfaces, published package APIs, session file format) is evaluated separately against the contract, as a contractual obligation rather than a reason to keep old code.
 
-> **Change checklist:** run `npm run verify` before every commit (Biome, type check, tests). Prompt, rule or stage changes also need an eval run before merge. Larger changes update `README.md` in the same PR (see User manual). A change to the JSON report updates its schema (`npm run schema`); the test says when they differ.
+> **Change checklist:** run `npm run verify` before every commit. Prompt, rule or stage changes also need an eval run before merge. Larger changes update `README.md` in the same PR (see User manual). A change to the JSON report or to `.ocra/config.json` updates its schema (`npm run schema`); the tests say when they differ.
 
 ## Engineering best practices
 
-Concrete rules behind the principles above, from the [2026-09-26 self-audit](docs/audits/2026-09-26-self-audit.md). Known traps are collected in [docs/pitfalls.md](docs/pitfalls.md); read it before touching the runtime, git or eval code, and add to it when something bites.
+Concrete rules behind the principles above, from the project's self-audits. Known traps are collected in `pitfalls.md` in the maintainers' private notes (`jma49/ocra-internal`, cloned next to this checkout as `../ocra-internal`); read it before touching the runtime, git or eval code, and add to it when something bites.
 
 ### Security
 
@@ -52,7 +52,7 @@ Concrete rules behind the principles above, from the [2026-09-26 self-audit](doc
 - **Least privilege for child processes.** Spawn with `execFile`/`spawn` and argument arrays, never a shell; pass `--end-of-options` before user refs; give child processes only the environment variables they need.
 - **Bind local servers to `127.0.0.1` with a per-run random port and credential**, compare credentials with `timingSafeEqual`.
 - **Secrets never reach code, logs, prompts, reports or session files.** Tests that touch secret handling assert the secret string is absent from every output.
-- **Pin what can change the attack surface.** OpenCode is pinned, its built-in tool list is asserted, and `custom-provider.test.ts` shows it reaches no network at review time but the model endpoint and its pricing catalog; treat any bump as a security review, and read that test's result as part of it.
+- **Pin what can change the attack surface.** OpenCode is pinned, its built-in tool list is asserted, and `custom-provider.e2e.test.ts` shows it reaches no network at review time but the model endpoint and its pricing catalog; treat any bump as a security review, and read that test's result as part of it.
 
 ### Performance and cost
 
@@ -74,7 +74,7 @@ Concrete rules behind the principles above, from the [2026-09-26 self-audit](doc
 
 - New behavior ships with a test at the lowest layer that can express it; pure stages are tested without I/O, adapters against a real temporary git repository.
 - Security properties get explicit negative tests (secret path refused, injected tag neutralized, control characters stripped).
-- **A fix is not done until its test fails without it.** Run the new test against the old code once; assertions of absence (`not.toContain`, "file does not exist") pass vacuously when the fixture never produces the thing. A fix commit changes code, not only docs and tests.
+- **A fix is not done until its test fails without it.** Run the new test against the old code once (`scripts/fails-without.sh <test> <source file>...` puts the files back as they are on `main`, rebuilds, runs the test and restores them); assertions of absence (`not.toContain`, "file does not exist") pass vacuously when the fixture never produces the thing. A fix commit changes code, not only docs and tests.
 - Tests use fake runtimes; nothing in `npm test` calls a model or the network.
 
 ## Code style
@@ -82,7 +82,9 @@ Concrete rules behind the principles above, from the [2026-09-26 self-audit](doc
 - **The code is the documentation.** Avoid large comment blocks. Express intent through names, types and small functions. Write a comment only for a "why" the code cannot say: a non-obvious constraint, a workaround, a deliberate trade-off. Never restate what the code does, narrate a change, or leave TODO chatter.
 - Source files, identifiers and commit messages are in English.
 - Prefer pure functions for deterministic stages; keep I/O at the edges.
+- `scripts/*.mjs` are thin entry points; their logic lives in `scripts/lib/*.mjs` next to its test.
 - Validate every LLM output against a Zod schema before it crosses a stage boundary.
+- **Public API goes through the API report.** A published package's main entry (`src/index.ts`) exports a named list, never `export *`. Adding, removing or changing a public export updates `etc/<package>.api.md` in the same PR (`npm run api`; `npm run check:api`, part of `verify` and CI, fails otherwise), and a change that can break a caller gets a changelog entry under the 0.x rule. What only ocra's own packages need goes to the package's `src/internal.ts` (`<package>/internal`), which is not a contract. Every `exports` entry starts with the `@open-cr-agent/source` condition (`scripts/workspace-exports.test.mjs`).
 
 ## User manual
 
@@ -101,7 +103,22 @@ Concrete rules behind the principles above, from the [2026-09-26 self-audit](doc
 - The author may merge their own PR once CI is green and they have self-reviewed the full diff; the maintainer spot-checks merged PRs afterwards. Link the issue with `Closes #N` so it closes on merge.
 - Merge with rebase so each Conventional Commit lands on `main` unchanged.
 - Keep PRs small and focused on one increment; split work that grows beyond a reviewable size.
-- Remove agent worktrees (`git worktree remove`) and their local branches when the work is done.
+- **A changeset per user-visible PR.** A PR that changes what users of the packages or the Action see adds one with `npx changeset`: the bump, and the `CHANGELOG.md` entry as short lines under Keep a Changelog sections (`### Added`, `Changed`, `Deprecated`, `Removed`, `Fixed`, `Security`), details left to the PR or the manual. Never edit `CHANGELOG.md`'s sections by hand outside a release PR; `npm run version-packages` writes them ([.changeset/README.md](.changeset/README.md)). CI's `changeset` job fails a PR that changes a published package's `src/` without one; `npx changeset --empty` answers for a change users do not see.
+- Work in a worktree made with `scripts/worktree.sh <branch>`: it installs and builds. Tests and the test type check need no build: they resolve workspace packages to their `src/` through the `@open-cr-agent/source` export condition (`vitest.config.ts`, `tsconfig.test.json`); only tests that run the real CLI build it themselves. Remove agent worktrees (`git worktree remove`) and their local branches when the work is done.
+
+## Working with agents
+
+Mirrored word for word in the AGENTS.md of ocra, ocra-cloud and ocra-site: change all three together.
+
+- **One owner per issue queue, one worktree per session.** Never edit a checkout another session is using.
+- **The maintainer runs production:** deploys, production database writes and secret-store changes. Prepare the exact command and a dry-run result, then hand off.
+- **A critical Dependabot alert is a P0:** fix or pin it the same day.
+- **Validate what you act on, after normalising it** (`new URL()`, path resolution), never only the raw input.
+- **Uniqueness and currency live in the database** (`UNIQUE`, `ON CONFLICT`, compare-and-set), never in check-then-write code.
+- **A fix's test fails on the old code on an assertion,** not on a module the fix adds (`scripts/fails-without.sh` refuses that).
+- **Shapes the CLI and ocra Cloud share live in `@open-cr-agent/cloud-contract`;** never retype them.
+- **Show only what exists:** mocks, demos and the landing use shipped behaviour and recorded or synthetic data, never the maintainer's accounts, numbers, keys or budget.
+- **Keep AGENTS.md under 150 lines:** a rule names the check that enforces it; stories go to `../ocra-internal/pitfalls.md`.
 
 ## Repository hygiene
 
@@ -119,17 +136,15 @@ The repository is public: anything committed stays readable in history even afte
 - Follow [Conventional Commits](https://www.conventionalcommits.org/): `<type>(<optional scope>): <subject>`.
   - Types: `feat`, `fix`, `docs`, `refactor`, `perf`, `test`, `build`, `ci`, `chore`, `revert`.
 - Subject: imperative mood, lowercase start, no trailing period, at most 72 characters.
-- Body (optional): wrap at 72 characters, explain *what* and *why*, not *how*.
-- One logical change per commit.
-- **Commits must not include `Co-authored-by` trailers or any other co-author metadata.**
-- **Pull request titles, descriptions and comments must not include AI attribution** such as "Generated with Claude Code" or similar tool footers.
+- Body (optional): wrap at 72 characters, explain *what* and *why*, not *how*. One logical change per commit.
+- **No AI attribution anywhere:** commits are authored and committed under a person's identity (never `noreply@anthropic.com`; set `user.name`/`user.email` in agent sessions), carry no `Co-authored-by` or other co-author metadata, and pull request titles, descriptions and comments carry no tool footer such as "Generated with Claude Code". CI's `commits` job enforces this (`scripts/attribution.mjs`).
 
 ## Agile practices
 
-- Work is planned as milestones (M1–M4 in the architecture doc) broken into small issues, each deliverable in one PR.
-- Every PR keeps `npm run verify` green; CI enforces it.
+- Work is planned as milestones in `docs/roadmap.md`, broken into small issues, each deliverable in one PR. When a milestone item lands, update the roadmap's readiness checklist and the README's milestone table in the same PR.
 - New behavior ships with tests. Review-quality changes (prompts, rules, stages) must be measured with the eval package before merge.
 - Record significant technical decisions as a new ADR in `docs/adr/` instead of rewriting old ones. Record spike results in `docs/spikes/`.
-- At the start of a session, read `docs/handoff.md`, and `.local/` if it exists: it is git-ignored and holds notes about the maintainer's machine and agent tooling (shell, keys, connectors) that do not belong in public docs. Put such notes there, not in `docs/`.
-- **Update `docs/handoff.md` at the end of every task or batch of work, before reporting it done, without being asked** (current state, environment notes, open questions, next steps; the site's state included). The maintainer should never have to remind you. Add anything that cost real time to understand to `docs/pitfalls.md`.
-- Periodic self-audits (architecture, engineering including security and performance, product) go in `docs/audits/<date>-<topic>.md`; their actionable findings become issues.
+- **Working notes are private.** The handoff, the pitfalls, the pending checks, the release runbook and the audits live in the maintainers' private notes (`jma49/ocra-internal`, cloned next to this checkout as `../ocra-internal`), not in this public repository. Never commit them, or details of the maintainer's accounts, keys, budget or machines, here.
+- At the start of a session, read `../ocra-internal/handoff.md` (clone `jma49/ocra-internal` there if it is missing), and `.local/` if it exists: it is git-ignored and holds notes about the maintainer's machine and agent tooling (shell, keys, connectors) that do not belong in public docs. Put such notes there, not in `docs/`.
+- **Update `../ocra-internal/handoff.md` at the end of every task or batch of work, before reporting it done, without being asked** (current state, maintainer actions, next steps, open questions; the site's state included). The maintainer should never have to remind you. **Rewrite, do not append:** replace what changed, delete what is done or no longer true, keep one list of next steps, and keep the file under about 150 lines; history belongs in git, `CHANGELOG.md` and the private repository's `audits/`. Add anything that cost real time to understand to its `pitfalls.md`. Commit and push those changes in that repository.
+- Periodic self-audits (architecture, engineering including security and performance, product) go in the private repository's `audits/<date>-<topic>.md`; their actionable findings become issues here.

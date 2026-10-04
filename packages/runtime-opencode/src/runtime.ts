@@ -6,14 +6,15 @@ import {
   type AgentEvent,
   type AgentRuntime,
   type AgentTaskSpec,
+  type AppliedSampling,
+  type AppliedSettings,
   type AttemptOutcome,
+  ChainRunner,
   type CompletionRequest,
   type CompletionResult,
-  type CustomProvider,
-  completeWithFailback,
+  type Effort,
   MAX_AGENT_STEPS,
-  ModelHealth,
-  type ModelTier,
+  OcraError,
   parseModel,
   RESUME_MESSAGE,
   REVIEW_TOOLS,
@@ -21,55 +22,33 @@ import {
   type RuntimeOptions,
   reviewTools,
   type Usage,
-  withFailback,
   withoutSecrets,
 } from "@open-cr-agent/core";
 import { createOpencodeClient, type OpencodeClient } from "@opencode-ai/sdk/v2";
 import { resolveOpencodeBinary } from "./binary.js";
+import { AppliedEfforts, type EffortRoutes } from "./effort.js";
+import { setUpEfforts } from "./effort-setup.js";
+import {
+  DISABLED_BUILTINS,
+  HELPER_AGENT,
+  MCP_SERVER,
+  openCodeConfig,
+  openCodeSampling,
+  REVIEW_AGENT,
+  WITHOUT_SAMPLING,
+} from "./opencode-config.js";
 import { type OpencodeServer, startOpencodeServer } from "./opencode-server.js";
 import { credentialValues, missingCredentials, serverEnv } from "./server-env.js";
 import { type PromptInput, promptSession } from "./session-prompt.js";
 import { startToolServer, type ToolServer } from "./tool-server.js";
 import { createUntimedDispatcher, untimedFetch } from "./transport.js";
 
-export const MCP_SERVER = "ocra";
-const REVIEW_AGENT = "ocra-reviewer";
-const HELPER_AGENT = "ocra-helper";
-// Must not be empty: OpenCode falls back to its full coding prompt otherwise.
-const REVIEW_AGENT_PROMPT =
-  "You are a code review agent run by ocra. Follow the review instructions below.";
-const HELPER_AGENT_PROMPT = "You answer exactly as the instructions below ask, with no tools.";
-// The helper answers in one step and has no tools. It still needs two:
-// OpenCode appends an assistant message on an agent's last allowed step, and
-// Gemini rejects a request that ends with a model turn (#66).
-export const HELPER_AGENT_STEPS = 2;
-
 // Sent once to a review agent that stopped before finishing (session-prompt.ts).
-export const REVIEW_RESUME = {
+const REVIEW_RESUME = {
   doneTool: REVIEW_TOOLS.taskDone,
   maxSteps: MAX_AGENT_STEPS,
   message: RESUME_MESSAGE,
 };
-
-// Every OpenCode built-in tool of the pinned version; a test fails when an
-// upgrade adds one, so a new write-capable tool can never be enabled silently.
-export const OPENCODE_BUILTIN_TOOLS = [
-  "invalid",
-  "question",
-  "bash",
-  "read",
-  "glob",
-  "grep",
-  "edit",
-  "write",
-  "task",
-  "webfetch",
-  "todowrite",
-  "websearch",
-  "skill",
-  "apply_patch",
-] as const;
-const DISABLED_BUILTINS = Object.fromEntries(OPENCODE_BUILTIN_TOOLS.map((t) => [t, false]));
 
 export interface OpenCodeRuntimeOptions extends RuntimeOptions {
   binary?: string;
@@ -83,92 +62,54 @@ interface Infra {
   tools: ToolServer;
   server: OpencodeServer;
   client: OpencodeClient;
+  efforts: EffortRoutes;
   dispatcher: ReturnType<typeof createUntimedDispatcher>;
 }
 
 export class OpenCodeRuntime implements AgentRuntime {
   readonly name = "opencode";
+  readonly sampling: AppliedSampling;
   private infra: Promise<Infra> | undefined;
   private context: ReviewContext | undefined;
-  private readonly health = new ModelHealth();
+  private readonly chains: ChainRunner;
   private readonly helperTools: Record<string, boolean>;
+  private readonly applied: AppliedEfforts;
 
-  constructor(private readonly options: OpenCodeRuntimeOptions) {
+  private readonly options: OpenCodeRuntimeOptions;
+
+  constructor(options: OpenCodeRuntimeOptions) {
+    this.options = options;
     const mcpTools = [...reviewTools, ...options.tools].map((t) => [
       `${MCP_SERVER}_${t.name}`,
       false,
     ]);
     this.helperTools = { ...DISABLED_BUILTINS, ...Object.fromEntries(mcpTools) };
+    this.sampling = openCodeSampling(options.sampling);
+    this.applied = new AppliedEfforts(options.sampling);
+    this.chains = new ChainRunner(options.models, {
+      refuse: (chain, own) => this.unprepared(chain, own),
+      ready: async () => {
+        await this.start();
+      },
+      task: (model, spec, signal, onUsage) => this.attemptTask(model, spec, signal, onUsage),
+      complete: (model, request, signal) => this.attemptCompletion(model, request, signal),
+    });
+  }
+
+  appliedTo(agent: string): AppliedSettings | undefined {
+    return this.applied.appliedTo(agent);
   }
 
   async *runTask(spec: AgentTaskSpec, signal: AbortSignal): AsyncIterable<AgentEvent> {
     if (this.context && this.context !== spec.context) {
-      throw new Error("An OpenCodeRuntime instance serves a single review run");
+      throw new OcraError("INTERNAL", "An OpenCodeRuntime instance serves a single review run");
     }
     this.context = spec.context;
-
-    const chain = this.options.models[spec.modelTier] ?? [];
-    if (chain.length === 0) {
-      yield {
-        type: "error",
-        taskId: spec.taskId,
-        retryable: false,
-        error: noModel(spec.modelTier),
-      };
-      return;
-    }
-
-    const infra = await this.start();
-    yield* withFailback({
-      taskId: spec.taskId,
-      tier: spec.modelTier,
-      chain,
-      health: this.health,
-      signal,
-      attempt: (model, onUsage) =>
-        this.prompt(
-          infra,
-          {
-            title: `ocra ${spec.taskId}`,
-            agent: REVIEW_AGENT,
-            model,
-            system: spec.systemPrompt,
-            user: spec.userPrompt,
-            tools: DISABLED_BUILTINS,
-            toolPrefix: `${MCP_SERVER}_`,
-            resume: REVIEW_RESUME,
-          },
-          signal,
-          onUsage,
-        ),
-    });
+    yield* this.chains.runTask(spec, signal);
   }
 
-  async complete(request: CompletionRequest, signal: AbortSignal): Promise<CompletionResult> {
-    const chain = this.options.models[request.tier] ?? [];
-    if (chain.length === 0) throw new Error(noModel(request.tier));
-
-    const infra = await this.start();
-    return completeWithFailback({
-      tier: request.tier,
-      chain,
-      health: this.health,
-      signal,
-      attempt: (model) =>
-        this.prompt(
-          infra,
-          {
-            title: "ocra helper",
-            agent: HELPER_AGENT,
-            model,
-            system: request.system,
-            user: request.user,
-            tools: this.helperTools,
-            toolPrefix: `${MCP_SERVER}_`,
-          },
-          signal,
-        ),
-    });
+  complete(request: CompletionRequest, signal: AbortSignal): Promise<CompletionResult> {
+    return this.chains.complete(request, signal);
   }
 
   async dispose(): Promise<void> {
@@ -178,6 +119,78 @@ export class OpenCodeRuntime implements AgentRuntime {
     process.off("exit", infra.onExit);
     await Promise.allSettled([infra.server.close(), infra.tools.close(), infra.dispatcher.close()]);
     await rm(infra.root, { recursive: true, force: true });
+  }
+
+  private async attemptTask(
+    model: string,
+    spec: AgentTaskSpec,
+    signal: AbortSignal,
+    onUsage: (spent: Usage) => void,
+  ): Promise<AttemptOutcome> {
+    const infra = await this.start();
+    return this.prompt(
+      infra,
+      {
+        title: `ocra ${spec.taskId}`,
+        ...this.effortCall(infra, REVIEW_AGENT, spec.reviewer, spec.effort, model),
+        model,
+        system: spec.systemPrompt,
+        user: spec.userPrompt,
+        tools: DISABLED_BUILTINS,
+        toolPrefix: `${MCP_SERVER}_`,
+        resume: REVIEW_RESUME,
+      },
+      signal,
+      onUsage,
+    );
+  }
+
+  private async attemptCompletion(
+    model: string,
+    request: CompletionRequest,
+    signal: AbortSignal,
+  ): Promise<AttemptOutcome> {
+    const infra = await this.start();
+    return this.prompt(
+      infra,
+      {
+        title: "ocra helper",
+        ...this.effortCall(
+          infra,
+          HELPER_AGENT,
+          request.agent ?? request.tier,
+          request.effort,
+          model,
+        ),
+        model,
+        system: request.system,
+        user: request.user,
+        tools: this.helperTools,
+        toolPrefix: `${MCP_SERVER}_`,
+      },
+      signal,
+    );
+  }
+
+  // The OpenCode agent and variant one attempt runs with, recorded for the
+  // agent's provenance.
+  private effortCall(
+    infra: Infra,
+    base: string,
+    agent: string,
+    effort: Effort | undefined,
+    model: string,
+  ): { agent: string; variant?: string } {
+    if (effort === undefined) return { agent: base };
+    const route = infra.efforts.route(model, effort);
+    const keepsSampling = this.applied.record(agent, effort, model, route !== undefined);
+    return {
+      agent:
+        keepsSampling || this.options.sampling?.temperature === undefined
+          ? base
+          : `${base}${WITHOUT_SAMPLING}`,
+      ...(route?.variant ? { variant: route.variant } : {}),
+    };
   }
 
   private prompt(
@@ -205,6 +218,21 @@ export class OpenCodeRuntime implements AgentRuntime {
     );
   }
 
+  // The server holds the credentials of the providers it started with; an
+  // agent's own chain naming another would fail at OpenCode as "model not
+  // found". The tier chains are always among them.
+  private unprepared(chain: readonly string[], own: boolean): OcraError | undefined {
+    if (!own) return undefined;
+    const prepared = new Set(providersOf(this.options));
+    const model = chain.find((m) => !prepared.has(parseModel(m).providerID));
+    return model === undefined
+      ? undefined
+      : new OcraError(
+          "CONFIG_INVALID",
+          `"${model}" is not among the models the runtime was started with (RuntimeOptions.models or agentModels)`,
+        );
+  }
+
   private start(): Promise<Infra> {
     this.infra ??= this.launch();
     return this.infra;
@@ -212,8 +240,8 @@ export class OpenCodeRuntime implements AgentRuntime {
 
   private async launch(): Promise<Infra> {
     const custom = this.options.providers ?? {};
-    const missing = missingCredentials(this.options.env, providersOf(this.options.models), custom);
-    if (missing.length > 0) throw new Error(missing.join("; "));
+    const missing = missingCredentials(this.options.env, providersOf(this.options), custom);
+    if (missing.length > 0) throw new OcraError("CONFIG_CREDENTIALS_MISSING", missing.join("; "));
     const root = await mkdtemp(join(tmpdir(), "ocra-opencode-"));
     const dirs = {
       config: join(root, "config"),
@@ -221,8 +249,9 @@ export class OpenCodeRuntime implements AgentRuntime {
       state: join(root, "state"),
     };
     const workspace = join(root, "workspace");
+    const probe = join(root, "probe");
     await Promise.all(
-      [...Object.values(dirs), workspace].map((d) => mkdir(d, { recursive: true })),
+      [...Object.values(dirs), workspace, probe].map((d) => mkdir(d, { recursive: true })),
     );
 
     const tools = await startToolServer(
@@ -234,17 +263,19 @@ export class OpenCodeRuntime implements AgentRuntime {
       const server = await startOpencodeServer({
         binary: this.options.binary ?? resolveOpencodeBinary(this.options.env),
         cwd: workspace,
-        env: serverEnv(this.options.env, dirs, providersOf(this.options.models), custom),
-        config: openCodeConfig(tools, this.helperTools, custom),
+        env: serverEnv(this.options.env, dirs, providersOf(this.options), custom),
+        config: openCodeConfig(tools, this.helperTools, custom, this.options.sampling),
       });
       started = server;
       const dispatcher = createUntimedDispatcher();
-      const client = createOpencodeClient({
-        baseUrl: server.url,
-        directory: workspace,
-        headers: { Authorization: server.authorization },
-        fetch: untimedFetch(dispatcher),
-      });
+      const clientFor = (directory: string) =>
+        createOpencodeClient({
+          baseUrl: server.url,
+          directory,
+          headers: { Authorization: server.authorization },
+          fetch: untimedFetch(dispatcher),
+        });
+      const client = clientFor(workspace);
       // A second Ctrl-C exits at once, before dispose() can run: stop
       // OpenCode and remove its directory synchronously on the way out.
       const onExit = () => {
@@ -252,8 +283,15 @@ export class OpenCodeRuntime implements AgentRuntime {
         rmSync(root, { recursive: true, force: true });
       };
       process.on("exit", onExit);
-      const secrets = credentialValues(this.options.env, providersOf(this.options.models), custom);
-      return { root, tools, server, client, dispatcher, onExit, secrets };
+      const efforts = await setUpEfforts({
+        models: chainModels(this.options),
+        custom,
+        probe: clientFor(probe).config,
+        workspace: client.config,
+        file: join(dirs.config, "opencode.json"),
+      });
+      const secrets = credentialValues(this.options.env, providersOf(this.options), custom);
+      return { root, tools, server, client, efforts, dispatcher, onExit, secrets };
     } catch (error) {
       await Promise.allSettled([tools.close(), started?.close()]);
       await rm(root, { recursive: true, force: true });
@@ -262,84 +300,15 @@ export class OpenCodeRuntime implements AgentRuntime {
   }
 }
 
-export function openCodeConfig(
-  tools: Pick<ToolServer, "url" | "headers">,
-  helperTools: Record<string, boolean>,
-  custom: Readonly<Record<string, CustomProvider>> = {},
-) {
-  const permission = { edit: "deny", bash: "deny", webfetch: "deny", skill: "deny" };
-  return {
-    share: "disabled",
-    autoupdate: false,
-    ...(Object.keys(custom).length > 0 ? { provider: providerConfig(custom) } : {}),
-    mcp: {
-      [MCP_SERVER]: {
-        type: "remote",
-        url: tools.url,
-        headers: tools.headers,
-        oauth: false,
-        enabled: true,
-      },
-    },
-    agent: {
-      [REVIEW_AGENT]: {
-        mode: "primary",
-        prompt: REVIEW_AGENT_PROMPT,
-        steps: MAX_AGENT_STEPS,
-        tools: DISABLED_BUILTINS,
-        permission,
-      },
-      [HELPER_AGENT]: {
-        mode: "primary",
-        prompt: HELPER_AGENT_PROMPT,
-        steps: HELPER_AGENT_STEPS,
-        tools: helperTools,
-        permission,
-      },
-    },
-  };
-}
-
-// OpenCode's form of a provider declared in configuration. OpenCode bundles
-// the OpenAI-compatible client, so nothing is installed to reach it
-// (docs/spikes/0002). The key stays in the environment: OpenCode reads
-// {env:NAME} itself, and the configuration, which OpenCode may log, never
-// holds it. Prices are per million tokens, as OpenCode's catalog has them.
-function providerConfig(custom: Readonly<Record<string, CustomProvider>>) {
-  return Object.fromEntries(
-    Object.entries(custom).map(([id, provider]) => [
-      id,
-      {
-        npm: "@ai-sdk/openai-compatible",
-        name: id,
-        options: {
-          baseURL: provider.baseUrl,
-          ...(provider.apiKeyEnv ? { apiKey: `{env:${provider.apiKeyEnv}}` } : {}),
-        },
-        models: Object.fromEntries(
-          Object.entries(provider.models).map(([model, price]) => [
-            model,
-            {
-              name: model,
-              cost: {
-                input: price.input,
-                output: price.output,
-                ...(price.cachedInput === undefined ? {} : { cache_read: price.cachedInput }),
-              },
-            },
-          ]),
-        ),
-      },
-    ]),
+// Every model a call may run on: the tiers' chains and the agents' own
+// (ADR-0025).
+function chainModels(options: Pick<RuntimeOptions, "models" | "agentModels">): string[] {
+  return [...Object.values(options.models), ...Object.values(options.agentModels ?? {})].flatMap(
+    (chain) => [...(chain ?? [])],
   );
 }
 
-function providersOf(models: RuntimeOptions["models"]): string[] {
-  return Object.values(models).flatMap((chain) =>
-    (chain ?? []).map((m) => parseModel(m).providerID),
-  );
-}
-
-function noModel(tier: ModelTier): string {
-  return `No model configured for the "${tier}" tier; set models.${tier} in .ocra/config.json or OCRA_MODEL_${tier.toUpperCase()}`;
+// The providers of those models, so each gets its credentials like a tier's.
+export function providersOf(options: Pick<RuntimeOptions, "models" | "agentModels">): string[] {
+  return chainModels(options).map((m) => parseModel(m).providerID);
 }

@@ -1,6 +1,6 @@
+import { addUsage, emptyUsage } from "../agent/usage.js";
 import type { AgentEvent, CompletionResult, ModelTier, Usage } from "../contracts.js";
 import { CompletionError } from "../errors.js";
-import { addUsage, emptyUsage } from "../pipeline/usage.js";
 import { type AttemptOutcome, attemptSummary } from "./attempt.js";
 import type { ModelHealth } from "./models.js";
 import { sleep } from "./quota.js";
@@ -8,6 +8,8 @@ import { sleep } from "./quota.js";
 export interface FailbackOptions {
   taskId: string;
   tier: ModelTier;
+  // Set when the chain is this agent's own rather than the tier's.
+  agent?: string;
   chain: readonly string[];
   health: ModelHealth;
   signal: AbortSignal;
@@ -79,8 +81,8 @@ export async function* withFailback(options: FailbackOptions): AsyncGenerator<Ag
     type: "error",
     taskId,
     error: lastError
-      ? `every ${options.tier} model failed (${lastError})`
-      : `every ${options.tier} model is out of quota for this run`,
+      ? `every ${chainName(options)} failed (${lastError})`
+      : `every ${chainName(options)} is out of quota for this run`,
     retryable: true,
   };
 }
@@ -88,7 +90,7 @@ export async function* withFailback(options: FailbackOptions): AsyncGenerator<Ag
 // Hands out what an attempt has spent in increments, each what grew since the
 // last one; `rest` settles the finished attempt's total, so the increments
 // add up to it and nothing is counted twice.
-export class LiveUsage {
+class LiveUsage {
   private seen = emptyUsage();
   private given = emptyUsage();
   private wake: (() => void) | undefined;
@@ -131,12 +133,23 @@ const FIELDS = [
   "costUsd",
 ] as const satisfies readonly (keyof Usage)[];
 
+// Each field of a usage from the same field of two others.
+function mapUsage(a: Usage, b: Usage, combine: (x: number, y: number) => number): Usage {
+  return {
+    inputTokens: combine(a.inputTokens, b.inputTokens),
+    outputTokens: combine(a.outputTokens, b.outputTokens),
+    reasoningTokens: combine(a.reasoningTokens, b.reasoningTokens),
+    cachedTokens: combine(a.cachedTokens, b.cachedTokens),
+    costUsd: combine(a.costUsd, b.costUsd),
+  };
+}
+
 function larger(a: Usage, b: Usage): Usage {
-  return Object.fromEntries(FIELDS.map((f) => [f, Math.max(a[f], b[f])])) as unknown as Usage;
+  return mapUsage(a, b, Math.max);
 }
 
 function beyond(a: Usage, b: Usage): Usage {
-  return Object.fromEntries(FIELDS.map((f) => [f, Math.max(0, a[f] - b[f])])) as unknown as Usage;
+  return mapUsage(a, b, (x, y) => Math.max(0, x - y));
 }
 
 function ahead(a: Usage, b: Usage): boolean {
@@ -145,6 +158,7 @@ function ahead(a: Usage, b: Usage): boolean {
 
 export interface CompleteOptions {
   tier: ModelTier;
+  agent?: string;
   chain: readonly string[];
   health: ModelHealth;
   signal: AbortSignal;
@@ -180,7 +194,13 @@ export async function completeWithFailback(options: CompleteOptions): Promise<Co
     }
   }
   if (!lastError) {
-    throw new CompletionError(`every ${options.tier} model is out of quota for this run`, usage);
+    throw new CompletionError(`every ${chainName(options)} is out of quota for this run`, usage);
   }
-  throw new CompletionError(`every ${options.tier} model failed (${lastError})`, usage);
+  throw new CompletionError(`every ${chainName(options)} failed (${lastError})`, usage);
+}
+
+function chainName(options: { tier: ModelTier; agent?: string }): string {
+  return options.agent === undefined
+    ? `${options.tier} model`
+    : `model of ${options.agent}'s own chain`;
 }

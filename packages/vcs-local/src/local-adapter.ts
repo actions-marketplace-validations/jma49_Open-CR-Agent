@@ -5,10 +5,11 @@ import {
   type ChangeRequest,
   type CodeMatch,
   type FileDiff,
+  OcraError,
   type PriorReview,
-  parseUnifiedDiff,
   type VcsAdapter,
 } from "@open-cr-agent/core";
+import { errnoCode, parseUnifiedDiff } from "@open-cr-agent/core/internal";
 import { GitError, git, isShallow, SHALLOW_HINT } from "./git.js";
 
 export type LocalTarget =
@@ -58,7 +59,11 @@ export class LocalGitAdapter implements VcsAdapter {
   readonly name = "local";
   private resolved: Promise<ResolvedTarget> | undefined;
 
-  constructor(private readonly options: LocalGitOptions) {}
+  private readonly options: LocalGitOptions;
+
+  constructor(options: LocalGitOptions) {
+    this.options = options;
+  }
 
   async repositoryRoot(): Promise<string> {
     return (await this.target()).root;
@@ -214,7 +219,8 @@ async function mergeBase(root: string, from: string, to: string): Promise<string
     return (await git(["merge-base", from, to], { cwd: root })).trim();
   } catch (error) {
     if (error instanceof GitError && (await isShallow(root))) {
-      throw new Error(
+      throw new OcraError(
+        "VCS_GIT_FAILED",
         `Cannot find where ${from.slice(0, 7)} and ${to.slice(0, 7)} diverge: ${SHALLOW_HINT}`,
       );
     }
@@ -253,7 +259,7 @@ async function readWorkingTreeFile(root: string, inside: string): Promise<string
       await handle.close();
     }
   } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
+    const code = errnoCode(error);
     if (code === "ENOENT" || code === "ENOTDIR") return undefined;
     throw error;
   }
@@ -271,7 +277,7 @@ function request(
 
 async function verifyCommit(root: string, ref: string): Promise<string> {
   const sha = await tryVerifyCommit(root, ref);
-  if (sha === undefined) throw new Error(`Unknown commit: ${ref}`);
+  if (sha === undefined) throw new OcraError("VCS_REF_UNKNOWN", `Unknown commit: ${ref}`);
   return sha;
 }
 

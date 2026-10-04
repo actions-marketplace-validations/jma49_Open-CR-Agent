@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { errorMessage, OcraError } from "../errors.js";
 
 // The part of SARIF 2.1.0 an import reads. Objects are loose: a log carries
 // far more than this, and none of it is trusted beyond what is checked here.
@@ -40,7 +41,7 @@ const result = z.looseObject({
   locations: z.array(location).optional(),
 });
 
-export const sarifRunSchema = z.looseObject({
+const sarifRunSchema = z.looseObject({
   tool: z.looseObject({
     driver: z.looseObject({
       name: z.string().min(1),
@@ -52,7 +53,7 @@ export const sarifRunSchema = z.looseObject({
   results: z.array(result).optional(),
 });
 
-export const sarifLogSchema = z.looseObject({
+const sarifLogSchema = z.looseObject({
   version: z.literal("2.1.0"),
   runs: z.array(sarifRunSchema),
 });
@@ -62,14 +63,19 @@ export type SarifRun = z.infer<typeof sarifRunSchema>;
 export type SarifResult = z.infer<typeof result>;
 export type SarifRule = z.infer<typeof rule>;
 
-export class SarifError extends Error {}
+export class SarifError extends OcraError {
+  constructor(message: string) {
+    super("INPUT_INVALID", message);
+    this.name = "SarifError";
+  }
+}
 
 export function parseSarifLog(text: string): SarifLog {
   let data: unknown;
   try {
     data = JSON.parse(text);
   } catch (error) {
-    throw new SarifError(`not valid JSON: ${(error as Error).message}`);
+    throw new SarifError(`not valid JSON: ${errorMessage(error)}`);
   }
   const parsed = sarifLogSchema.safeParse(data);
   if (!parsed.success)

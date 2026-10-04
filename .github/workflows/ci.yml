@@ -14,30 +14,124 @@ concurrency:
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
+  # Branch protection requires this job by name: keep it a single job, the
+  # Node versions go in node-matrix.
   verify:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 22
-          cache: npm
-      - run: npm ci
+          persist-credentials: false
+      - uses: ./.github/actions/setup
       - run: npm audit --omit=dev --audit-level=high
       - run: npm run check
       - run: npm run typecheck
+      # The public API of each package against its report in etc/.
+      - run: npm run check:api
+      # Unused files, exports and dependencies (knip.json).
+      - run: npm run knip
+      # Coverage is reported, not gated.
+      - run: npm run test:coverage
+      - run: node scripts/coverage-summary.mjs >> "$GITHUB_STEP_SUMMARY"
+
+  # The supported range: the engines floor exactly, the Node the release
+  # workflow publishes with, and the newest release.
+  node-matrix:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [22.19.0, 24, latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+        with:
+          node-version: ${{ matrix.node }}
+      - run: node --version
+      - run: npm run build
       - run: npm test
+
+  # actionlint (with shellcheck, preinstalled on the runner) and zizmor's
+  # offline audits of the workflows, action.yml and dependabot.yml, both at
+  # pinned versions; zizmor reads .github/zizmor.yml. shellcheck checks the
+  # shell scripts of the actions and scripts/ too.
+  workflows:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: actionlint
+        env:
+          VERSION: 1.7.12
+          SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+        run: |
+          archive="actionlint_${VERSION}_linux_amd64.tar.gz"
+          curl -fsSL -o "$RUNNER_TEMP/$archive" \
+            "https://github.com/rhysd/actionlint/releases/download/v${VERSION}/${archive}"
+          echo "$SHA256  $RUNNER_TEMP/$archive" | sha256sum --check --strict
+          tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP" actionlint
+          "$RUNNER_TEMP/actionlint" -color
+      - name: zizmor
+        run: pipx run zizmor==1.30.1 --offline --format github .
+      - name: shellcheck
+        run: shellcheck .github/actions/*/*.sh scripts/*.sh
+
+  # A pull request that changes a published package's source carries a
+  # changeset, the entry for CHANGELOG.md (.changeset/README.md). Tests,
+  # fixtures and files outside src/ need none (changedFilePatterns in
+  # .changeset/config.json); for a source change users do not see,
+  # `npx changeset --empty` answers.
+  changeset:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+        with:
+          npm-ci-args: --ignore-scripts
+      - env:
+          BASE_REF: ${{ github.base_ref }}
+        run: npx --no-install changeset status --since="origin/$BASE_REF"
+
+  # The pull request's own commits follow Conventional Commits
+  # (commitlint.config.mjs); history before this check is not rewritten.
+  commits:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+        with:
+          npm-ci-args: --ignore-scripts
+      - env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: npx --no-install commitlint --from "$BASE" --to "$HEAD" --verbose
+      # No AI author, co-author trailer or tool footer (AGENTS.md). The
+      # description is checked when commits are pushed, not on later edits.
+      - env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: node scripts/attribution.mjs "$BASE" "$HEAD"
 
   # Installs the packed packages like a user would and runs the installed CLI.
   packages:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 22
-          cache: npm
-      - run: npm ci
+          persist-credentials: false
+      - uses: ./.github/actions/setup
       - run: npm run check:packages
 
   # The Action's install step both ways, then the installed ocra, with no
@@ -77,35 +171,27 @@ jobs:
           OCRA_INSTALL: ${{ matrix.install }}
           OCRA_MAIN: ${{ steps.install.outputs.main }}
           OCRA_SOURCE: ${{ steps.install.outputs.source }}
+        run: node scripts/check-action-install.mjs
+      # The Action's outputs, from a session report laid out as ocra writes
+      # it (a review needs a model).
+      - id: outputs
         run: |
-          # Building from source is right only while a package at this version
-          # is not on npm yet, or when this commit declares other dependencies
-          # than the published version; never because an install or a check
-          # of what npm serves failed.
-          if [ "$OCRA_INSTALL" = npm ] && [ "${OCRA_MAIN#"$RUNNER_TEMP"}" = "$OCRA_MAIN" ]; then
-            case "$OCRA_SOURCE" in
-              unpublished | dependencies) echo "Built from source: $OCRA_SOURCE" ;;
-              *)
-                echo "::error::the Action built from source ($OCRA_SOURCE) instead of installing from npm"
-                exit 1
-                ;;
-            esac
-          fi
-          # The install used an npm cache of its own, not ~/.npm.
-          node -e 'require("fs").statSync(require("path").join(process.env.RUNNER_TEMP, "ocra-npm-cache", "_cacache"))'
-          node "$OCRA_MAIN" --version
-          # The runtime finds the OpenCode binary in the installed layout.
-          node --input-type=module -e '
-            import { execFileSync } from "node:child_process";
-            import { createRequire } from "node:module";
-            import { dirname, join } from "node:path";
-            import { pathToFileURL } from "node:url";
-            const index = createRequire(process.env.OCRA_MAIN).resolve("@open-cr-agent/runtime-opencode");
-            // import() takes a URL: a Windows path would read as the scheme "d:".
-            const { resolveOpencodeBinary } = await import(pathToFileURL(join(dirname(index), "binary.js")).href);
-            const binary = resolveOpencodeBinary({});
-            console.log(binary, execFileSync(binary, ["--version"], { encoding: "utf8" }).trim());
-          '
+          session=.ocra/sessions/20991231T235959Z-abcdef
+          mkdir -p "$session"
+          printf '{"version":1,"runId":"20991231T235959Z-abcdef","verdict":"approved","findings":[]}\n' > "$session/report.json"
+          OCRA_EXIT_CODE=0 OCRA_STARTED="$(date -u +%Y%m%dT%H%M%SZ)" node scripts/action-outputs.mjs
+      - env:
+          EXIT_CODE: ${{ steps.outputs.outputs.exit-code }}
+          RUN_ID: ${{ steps.outputs.outputs.run-id }}
+          VERDICT: ${{ steps.outputs.outputs.verdict }}
+          FINDINGS: ${{ steps.outputs.outputs.findings }}
+          REPORT: ${{ steps.outputs.outputs.report }}
+        run: |
+          test "$EXIT_CODE" = 0
+          test "$RUN_ID" = 20991231T235959Z-abcdef
+          test "$VERDICT" = approved
+          test "$FINDINGS" = 0
+          grep -q '"verdict":"approved"' "$REPORT"
 
   # The container image, built from this commit rather than from npm (its
   # version may not be published yet), then run as a user would.
@@ -118,13 +204,16 @@ jobs:
           persist-credentials: false
       - run: docker build --build-arg OCRA_INSTALL=source --tag ocra:ci .
       - run: |
+          docker run --rm ocra:ci --version
+          # The command lines of images up to 0.2.0, and GitLab's shell.
           docker run --rm ocra:ci ocra --version
+          docker run --rm --entrypoint "" ocra:ci sh -c 'ocra --version'
           mkdir repo && cd repo
           git init -q -b main
           git -c user.email=ci@example.com -c user.name=CI commit -q --allow-empty -m init
           printf 'export const retries = -1;\n' > app.ts
           # As CI runs it: the checkout mounted and owned by another user.
-          plan=$(docker run --rm --user "$(id -u):$(id -g)" --volume "$PWD:/repo" ocra:ci ocra review --plan)
+          plan=$(docker run --rm --user "$(id -u):$(id -g)" --volume "$PWD:/repo" ocra:ci review --plan)
           echo "$plan"
           echo "$plan" | grep -q "Review tasks: 1"
 

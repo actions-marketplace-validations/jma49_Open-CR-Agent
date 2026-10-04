@@ -1,3 +1,3 @@
-export * from "./adapter.js";
-export * from "./client.js";
-export * from "./plugin.js";
+export { GitHubApiError } from "./client.js";
+export { githubPlugin } from "./plugin.js";
+export { type GitHubSettings, resolveGitHubTarget } from "./target.js";

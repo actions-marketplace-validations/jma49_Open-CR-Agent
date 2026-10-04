@@ -30,11 +30,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: 22
-          cache: npm
-      - run: npm ci
+          persist-credentials: false
+      - uses: ./.github/actions/setup
       - run: npm run build
       # The configuration lives outside the reviewed tree, as the manual's
       # recipe says: the review runs with --no-repo-config and nothing from the
@@ -77,7 +74,23 @@ jobs:
             --no-repo-config --config "$RUNNER_TEMP/ocra-live.json" \
             --format json --output "$RUNNER_TEMP/report.json"
           echo "exit=$?" >> "$GITHUB_OUTPUT"
+      # A day whose free requests ran out fails every task with HTTP 429: that
+      # says nothing about ocra, so it is a notice, as in the dogfood workflow.
+      - name: Skip a spent free quota
+        id: quota
+        shell: bash
+        run: |
+          report="$RUNNER_TEMP/report.json"
+          if [ -f "$report" ] && jq -e '
+            [.tasks[]? | select(.status != "completed")] as $failed
+            | ($failed | length) > 0
+              and ([$failed[] | select((.error // "") | test("429|quota|rate.?limit|free-models-per-day"; "i"))] | length) == ($failed | length)
+          ' "$report" > /dev/null; then
+            echo "::notice title=Live smoke skipped::the free model quota is spent until 00:00 UTC"
+            echo "spent=true" >> "$GITHUB_OUTPUT"
+          fi
       - name: Check the report
+        if: steps.quota.outputs.spent != 'true'
         shell: bash
         env:
           EXIT: ${{ steps.review.outputs.exit }}
@@ -85,23 +98,7 @@ jobs:
           # 0 and 1 are reviews that finished (1: a confirmed critical, which
           # a model may report); 2 is an error, 3 an incomplete review.
           case "$EXIT" in 0|1) ;; *) echo "::error::ocra review exited $EXIT"; exit 1 ;; esac
-          node --input-type=module -e '
-            import { readFile } from "node:fs/promises";
-            const report = JSON.parse(await readFile(process.env.RUNNER_TEMP + "/report.json", "utf8"));
-            const problems = [];
-            if (report.version !== 1) problems.push(`report version ${report.version}`);
-            const tasks = report.tasks ?? [];
-            if (tasks.length === 0) problems.push("no review task ran");
-            for (const t of tasks) if (t.status !== "completed") problems.push(`task ${t.taskId} ${t.status}: ${t.error ?? ""}`);
-            if (report.usage.costUsd !== 0) problems.push(`cost $${report.usage.costUsd}, expected $0 on the free model`);
-            if (report.usage.inputTokens === 0) problems.push("no tokens reported");
-            const expected = `router/${process.env.MODEL}`;
-            for (const f of report.findings ?? []) {
-              if (f.provenance?.model !== expected) problems.push(`finding ${f.fingerprint} from ${f.provenance?.model}`);
-            }
-            console.log(`${tasks.length} task(s), ${report.findings.length} finding(s), verdict ${report.verdict}, ${report.usage.inputTokens} in / ${report.usage.outputTokens} out tokens, run ${report.runId ?? "n/a"}`);
-            if (problems.length > 0) { console.error(problems.join("\n")); process.exit(1); }
-          '
+          node scripts/live-smoke-check.mjs "$RUNNER_TEMP/report.json"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:

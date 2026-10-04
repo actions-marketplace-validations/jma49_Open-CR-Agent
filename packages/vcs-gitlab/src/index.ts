@@ -1,3 +1,3 @@
-export * from "./adapter.js";
-export * from "./client.js";
-export * from "./plugin.js";
+export { GitLabApiError } from "./client.js";
+export { gitlabPlugin } from "./plugin.js";
+export { type GitLabSettings, resolveGitLabTarget } from "./target.js";

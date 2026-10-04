@@ -11,13 +11,17 @@ Later pipelines review only what changed since the last review. The rules are th
 
 <Callout type="warn">
 
-GitLab support is new in 0.2.0. It has been tested against a fake GitLab API, not yet on a live instance.
+GitLab support is new in 0.2.0. Besides the tests against a fake GitLab API, it was checked on GitLab.com Free on 2026-10-04 (0.3.0, a dedicated account's personal access token, a scripted model): threads on added and on unchanged lines, the summary updated in place, an incremental second run without repeated comments, no live mention, link or quick action from model text, and the author's resolution, override and edit of ocra's summary all counting for nothing. A dismissal by another member has not been tried live yet.
 
 </Callout>
 
 ## Set up
 
-1. **Create a project access token** (Settings → Access tokens) with the **Developer** role and the **`api`** scope. ocra posts notes and threads, resolves its threads, and reads, through GraphQL, who last edited a comment. `CI_JOB_TOKEN` cannot post comments.
+1. **Create a token for ocra** with the **`api`** scope and the **Developer** role:
+   - on GitLab Premium or Ultimate, and on self-managed GitLab, a **project access token** (Settings → Access tokens), which gets a bot user of its own;
+   - on GitLab.com Free, where project access tokens are not available, a **personal access token** of a dedicated account (for example `ocra-review-bot`, invited to the project as Developer). Do not use your own account's token: ocra would then post as you, and since it never takes a merge request's author for a reviewer, your own merge requests would lose your dismissals and overrides.
+
+   ocra posts notes and threads, resolves its threads, and reads, through GraphQL, who last edited a comment. `CI_JOB_TOKEN` cannot post comments.
 2. **Add it as a CI/CD variable named `GITLAB_TOKEN`**, masked. Leave it unprotected: pipelines for merge requests from unprotected branches cannot read protected variables. So every pipeline of the project can read the token: keep its role at Developer and give it an expiry date ([who controls the pipeline](#who-controls-the-pipeline)).
 3. **Add your model key** the same way, for example `GEMINI_API_KEY`: a key that serves only these reviews, with a spending limit at the provider.
 4. **Add the job** to `.gitlab-ci.yml`:
@@ -36,15 +40,18 @@ ocra-review:
   allow_failure:
     exit_codes: [1]
   script:
-    - npm install -g --ignore-scripts @open-cr-agent/cli@0.2.0
+    - npm install -g --ignore-scripts @open-cr-agent/cli@0.5.0
     - ocra review --mr "$CI_MERGE_REQUEST_IID" --publish
 ```
 
-The job can also use the [container image](./installation#container-image), which needs no install step. Pin it by digest, which `docker buildx imagetools inspect ghcr.io/jma49/ocra:0.2.0` prints, and check its build provenance as [Stability](./stability#verifying-a-release) shows:
+The job can also use the [container image](./installation#container-image), which needs no install step. Pin it by digest, which `docker buildx imagetools inspect ghcr.io/jma49/ocra:0.5.0` prints, and check its build provenance as [Stability](./stability#verifying-a-release) shows:
 
 ```yaml
 ocra-review:
-  image: ghcr.io/jma49/ocra:0.2.0@sha256:<digest>
+  image:
+    name: ghcr.io/jma49/ocra:0.5.0@sha256:<digest>
+    # The job's script runs in a shell, not through the image's ocra entrypoint.
+    entrypoint: [""]
   # (rules, variables, interruptible and allow_failure as above)
   script:
     - ocra review --mr "$CI_MERGE_REQUEST_IID" --publish
@@ -59,6 +66,7 @@ Models come from the target branch's `.ocra/config.json`, or from `OCRA_MODEL_*`
 - **A thread on each finding** on a line of the diff: on an added line, or on an unchanged line next to the change. A finding GitLab will not place stays in the summary.
 - **One summary note**, updated in place: verdict, summary, findings outside the diff, what was fixed since the last review, and coverage, cost and the run id.
 - **Resolved threads** when the code a finding quoted is gone.
+- **Suggestions you can apply** (planned: no reviewer produces fixes yet, [ADR-0029](https://github.com/jma49/Open-CR-Agent/blob/main/docs/adr/0029-committable-suggestions.md)): when a finding carries a fix, code that replaces the lines it is about, its thread ends with a `suggestion:-N+0` block reaching from the thread's line back to the first fixed line, which you apply from the merge request (**Apply suggestion**). ocra offers one only when the thread covers exactly the fixed lines, at most 100 lines above it, and posts the code exactly as written or not at all, as on [GitHub](./github#committable-suggestions).
 
 Reviewers stay in charge. When someone with the Developer role or higher, other than the merge request's author, resolves one of ocra's threads, or answers it with `/ocra dismiss` or a reply that opens with "won't fix", "by design" or "false positive", the finding is dismissed. Other replies from them reach the judge the next time the finding comes back. A comment someone else edited counts for nothing.
 

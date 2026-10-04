@@ -1,48 +1,13 @@
 import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { type Severity, severitySchema } from "@open-cr-agent/core";
+import { errorMessage } from "@open-cr-agent/core";
+import { severitySchema } from "@open-cr-agent/core/internal";
 import { z } from "zod";
-import { ATTACK_CHANNELS, ATTACK_GOALS, type Attack, attackInstance } from "./attack.js";
-import type { Instance, ReferenceComment } from "./dataset.js";
+import { attackInstance } from "./attack.js";
+import { ATTACK_CHANNELS, ATTACK_GOALS, type Instance, type ReferenceComment } from "./instance.js";
 
 // ADR-0011: cases ocra owns, one JSON file each, with the findings a review
 // must report and the ranges where a finding is wrong.
-
-export type GoldenTier = "smoke" | "full" | "adversarial";
-
-export interface ForbiddenRange {
-  path: string;
-  fromLine: number;
-  toLine: number;
-  reason: string;
-}
-
-export interface Adjudication {
-  fingerprint: string;
-  label: "valid" | "invalid";
-  reason: string;
-  title: string;
-}
-
-export interface Location {
-  path: string;
-  fromLine: number;
-  toLine: number;
-}
-
-export interface GoldenInfo {
-  tier: GoldenTier;
-  clean: boolean;
-  forbid: ForbiddenRange[];
-  adjudicated: Adjudication[];
-  // The lowest severity that counts, one per reference, in their order.
-  minSeverity: Severity[];
-  // Other places the same issue can rightly be reported (the docs that
-  // promise a behavior, the test that misses it), one list per reference.
-  alternates: Location[][];
-  // Set on an adversarial case: the hostile text planted in the case it names.
-  attack?: Attack;
-}
 
 // Golden cases name ocra's reviewers; scoring and the ceiling speak
 // AACR-Bench's category names.
@@ -162,13 +127,13 @@ const attackCaseSchema = z
   })
   .strict();
 
-export type AttackCase = z.infer<typeof attackCaseSchema>;
+type AttackCase = z.infer<typeof attackCaseSchema>;
 
 function isAttackCase(data: unknown): boolean {
   return typeof data === "object" && data !== null && "attack" in data;
 }
 
-export function parseAttackCase(data: unknown, source: string): AttackCase {
+function parseAttackCase(data: unknown, source: string): AttackCase {
   const result = attackCaseSchema.safeParse(data);
   if (!result.success) {
     const issue = result.error.issues[0];
@@ -272,6 +237,6 @@ export async function readJson(path: string, label = path): Promise<unknown> {
   try {
     return JSON.parse(text);
   } catch (error) {
-    throw new Error(`${label}: not valid JSON (${(error as Error).message})`);
+    throw new Error(`${label}: not valid JSON (${errorMessage(error)})`);
   }
 }

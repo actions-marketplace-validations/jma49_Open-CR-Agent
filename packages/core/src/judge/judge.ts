@@ -1,3 +1,6 @@
+import { parseJsonAnswer } from "../agent/json.js";
+import { type AgentCallSettings, agentCall } from "../agent/settings.js";
+import { at } from "../at.js";
 import type { AgentRuntime, Usage } from "../contracts.js";
 import type {
   ChangeRequest,
@@ -7,12 +10,11 @@ import type {
   Severity,
   Verdict,
 } from "../domain.js";
-import { errorMessage, usageSpent } from "../errors.js";
-import { parseJsonAnswer } from "../pipeline/helpers.js";
+import { errorMessage, OcraError, usageSpent } from "../errors.js";
 import { buildJudgePrompt, type JudgeResponse, judgeResponseSchema } from "./prompt.js";
 import { decideVerdict, defaultSummary } from "./verdict.js";
 
-export const JUDGE_TIMEOUT_MS = 180_000;
+const JUDGE_TIMEOUT_MS = 180_000;
 
 export interface JudgeDecisions {
   merged: { kept: string; merged: string[] }[];
@@ -36,6 +38,7 @@ export interface JudgeOptions {
   tier: RiskTier;
   signal: AbortSignal;
   enabled: boolean;
+  call?: AgentCallSettings | undefined;
   // --ultra: keep what the judge would drop, marked low confidence.
   keepDropped?: boolean;
   // Earlier findings still open but not reported this time; the judge does
@@ -63,12 +66,19 @@ export async function judgeFindings(
   let response: JudgeResponse;
   try {
     const answer = await complete(
-      { tier: "top", system: prompt.system, user: prompt.user, timeoutMs: JUDGE_TIMEOUT_MS },
+      {
+        tier: "top",
+        ...agentCall("judge", options.call),
+        system: prompt.system,
+        user: prompt.user,
+        timeoutMs: JUDGE_TIMEOUT_MS,
+      },
       AbortSignal.any([options.signal, AbortSignal.timeout(JUDGE_TIMEOUT_MS)]),
     );
     usage = [answer.usage];
     const parsed = judgeResponseSchema.safeParse(parseJsonAnswer(answer.text));
-    if (!parsed.success) throw new Error("the judge returned an invalid response");
+    if (!parsed.success)
+      throw new OcraError("RUNTIME_INVALID_OUTPUT", "the judge returned an invalid response");
     response = parsed.data;
   } catch (error) {
     const spent = usageSpent(error);
@@ -113,7 +123,7 @@ export function applyDecisions(
   const decisions: JudgeDecisions = { merged: [], dropped: [], recalibrated: [] };
   const warnings: string[] = [];
   const removed = new Set<number>();
-  const isProtected = (i: number) => protectedFinding(findings[i] as Finding);
+  const isProtected = (i: number) => protectedFinding(at(findings, i));
 
   for (const group of response.duplicates) {
     const members = [...new Set(group.filter(valid))].filter((i) => !removed.has(i));
@@ -124,8 +134,8 @@ export function applyDecisions(
     if (keep === undefined || rest.length === 0) continue;
     for (const i of rest) removed.add(i);
     decisions.merged.push({
-      kept: (findings[keep] as Finding).fingerprint,
-      merged: rest.map((i) => (findings[i] as Finding).fingerprint),
+      kept: at(findings, keep).fingerprint,
+      merged: rest.map((i) => at(findings, i).fingerprint),
     });
   }
 
@@ -133,12 +143,12 @@ export function applyDecisions(
     if (!valid(index) || removed.has(index)) continue;
     if (isProtected(index)) {
       warnings.push(
-        `judge tried to drop the confirmed critical finding ${(findings[index] as Finding).fingerprint.slice(0, 8)}; kept it`,
+        `judge tried to drop the confirmed critical finding ${at(findings, index).fingerprint.slice(0, 8)}; kept it`,
       );
       continue;
     }
     removed.add(index);
-    const f = findings[index] as Finding;
+    const f = at(findings, index);
     decisions.dropped.push({ fingerprint: f.fingerprint, file: f.file, title: f.title, reason });
   }
 

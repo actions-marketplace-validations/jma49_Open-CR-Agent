@@ -1,13 +1,13 @@
-import {
-  type ChangeRequest,
-  type CodeMatch,
-  errorMessage,
-  type FileDiff,
-  type PriorFinding,
-  type PriorReview,
-  type ReviewReport,
-  type VcsAdapter,
+import type {
+  ChangeRequest,
+  CodeMatch,
+  FileDiff,
+  PriorFinding,
+  PriorReview,
+  ReviewReport,
+  VcsAdapter,
 } from "@open-cr-agent/core";
+import { errorMessage } from "@open-cr-agent/core";
 import type {
   Bot,
   InlineFinding,
@@ -69,7 +69,10 @@ export class PlatformReview implements VcsAdapter {
   private readonly memo = new Map<string, Promise<unknown>>();
   private readonly writers = new Map<string, Promise<boolean>>();
 
-  constructor(private readonly options: PlatformReviewOptions) {
+  private readonly options: PlatformReviewOptions;
+
+  constructor(options: PlatformReviewOptions) {
+    this.options = options;
     this.name = options.name;
     this.platform = options.platform;
   }
@@ -256,7 +259,12 @@ export class PlatformReview implements VcsAdapter {
 
     const fresh: InlineFinding[] = report.findings.flatMap((f) => {
       if (alreadyCommented.has(f.fingerprint) || !f.lineRange || !f.anchor.inDiff) return [];
-      return [{ finding: { ...f, lineRange: f.lineRange }, body: inlineBody(f) }];
+      return [
+        {
+          finding: { ...f, lineRange: f.lineRange },
+          body: inlineBody(f, this.platform.suggestionFence),
+        },
+      ];
     });
     const published = await this.platform.publishFindings(report, fresh);
 
@@ -282,6 +290,7 @@ export class PlatformReview implements VcsAdapter {
           commented: commented.has(f.fingerprint),
           ...(f.quote ? { quote: f.quote } : {}),
           ...(f.verification ? { verification: f.verification } : {}),
+          reviewer: f.reviewer,
         })),
       ...quiet.filter((f) => !current.has(f.fingerprint)),
     ];

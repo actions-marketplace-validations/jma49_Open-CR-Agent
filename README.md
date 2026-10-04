@@ -8,7 +8,7 @@ It reviews local changes, GitHub pull requests and GitLab merge requests, runs i
 [![CI](https://github.com/jma49/Open-CR-Agent/actions/workflows/ci.yml/badge.svg)](https://github.com/jma49/Open-CR-Agent/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
-> **Status:** early 0.x. The CLI flags, configuration keys, exit codes and report format are [contracts](docs/manual/en/stability.mdx) and change only with notice; prompts and review quality still move. [Measured quality](docs/manual/en/quality.mdx) says what reviews find and miss today, on a small sample. Manual: [ocra.majincheng.com](https://ocra.majincheng.com) ([English](docs/manual/en/index.mdx) · [中文](docs/manual/zh/index.mdx)).
+> **Status:** early 0.x. The CLI flags, configuration keys, exit codes and report format are [contracts](docs/manual/en/stability.mdx) and change only with notice; prompts and review quality still move. [Measured quality](docs/manual/en/quality.mdx) says what reviews find and miss today, on a small sample. Manual: [ocracloud.com](https://ocracloud.com) ([English](docs/manual/en/index.mdx) · [中文](docs/manual/zh/index.mdx)).
 
 ## Why ocra
 
@@ -60,7 +60,7 @@ Pick models in `.ocra/config.json` of the repository you review (or with `OCRA_M
 ```bash
 ocra review                                  # uncommitted changes, including untracked files
 ocra review --commit abc123                  # a single commit
-ocra review --plan                           # files, bundles, tasks and prompt sizes; no model call
+ocra review --plan                           # files, bundles, tasks, prompt sizes, input cost; no model call
 ocra review --max-cost-usd 2                 # a spend limit; the report says what it left
 ocra review --format sarif --output out.sarif
 ocra review --import-sarif semgrep.sarif        # an analyzer's results on the change join the review
@@ -68,7 +68,7 @@ ocra review --pr 42 --publish                # a GitHub pull request, posted as 
 ocra review --mr 7 --publish                 # a GitLab merge request
 ```
 
-Without installing: `npx @open-cr-agent/cli review`. The [quickstart](docs/manual/en/quickstart.mdx) walks through a first run; [Model providers](docs/manual/en/providers.mdx) covers every provider, including your own OpenAI-compatible endpoint with a price per model.
+Without installing: `npx @open-cr-agent/cli review`. OpenCode, the default runtime, is an optional dependency; with the `direct` runtime you can install without it, 11 MB instead of 175 MB ([Installation](docs/manual/en/installation.mdx#without-opencode)). The [quickstart](docs/manual/en/quickstart.mdx) walks through a first run; [Model providers](docs/manual/en/providers.mdx) covers every provider, including your own OpenAI-compatible endpoint with a price per model.
 
 ## In CI
 
@@ -91,12 +91,12 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-      - uses: jma49/Open-CR-Agent@v0.2.0
+      - uses: jma49/Open-CR-Agent@d3af4e2189007de77dcf17e736855d04be4a491c # v0.5.0
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
 ```
 
-The Action installs the published CLI only when every package carries provenance from this repository's release workflow; otherwise it builds from source and says so. Pull requests from forks need the gated `pull_request_target` setup in the [GitHub guide](docs/manual/en/github.mdx).
+Pin the Action by commit, as here: a tag can be moved. Its outputs (`verdict`, `exit-code`, `run-id`, `findings`, `report`, and `sarif` with `sarif: true`) feed later steps, such as uploading SARIF to code scanning. The Action installs the published CLI only when every package carries provenance from this repository's release workflow; otherwise it builds from source and says so. With `"runtime": "direct"` in the configuration, `opencode: false` skips installing OpenCode. Pull requests from forks need the gated `pull_request_target` setup in the [GitHub guide](docs/manual/en/github.mdx).
 
 **GitLab merge requests**, on GitLab.com or self-managed, from a CI job: see the [GitLab guide](docs/manual/en/gitlab.mdx).
 
@@ -140,7 +140,7 @@ Repository guidelines come from `AGENTS.md`; path-scoped review rules from `.ocr
 { "rules": [{ "path": "api/**", "rule": "Handlers must check tenant ownership." }] }
 ```
 
-A team can also share configuration over https (`extends`), `ocra review --config <file>` reads a file of your own instead of the repository's (also under `--no-repo-config`), `ocra memory` records the findings a team accepts so they are not reported again, and `ocra metrics` counts runs, cost, findings and what became of them over the session reports. Every key: [Configuration](docs/manual/en/configuration.mdx), [Rules](docs/manual/en/rules.mdx).
+A team can also share configuration over https (`extends`), `ocra review --config <file>` reads a file of your own instead of the repository's (also under `--no-repo-config`), `ocra memory` records the findings a team accepts so they are not reported again, and `ocra metrics` counts runs, cost, findings and what became of them over the session reports. `ocra login`, `ocra logout` and `ocra whoami` sign in to ocra Cloud (https://app.ocracloud.com, in development) ([CLI](docs/manual/en/cli.mdx#ocra-login-ocra-logout-ocra-whoami)). While signed in, your account's models, limits, file patterns and rules apply under the repository's configuration, never in place of it, and never providers or plugins ([Account settings](docs/manual/en/configuration.mdx#account-settings)). Findings remembered from the web join `.ocra/memory.json`'s, and the report names which memory hid each one; findings go to ocra Cloud only when the account turns that on, with secret-looking tokens redacted first ([CLI](docs/manual/en/cli.mdx#memory-in-your-ocra-cloud-account)). Every key: [Configuration](docs/manual/en/configuration.mdx), [Rules](docs/manual/en/rules.mdx).
 
 ## Extending ocra
 
@@ -165,9 +165,9 @@ export default {
 };
 ```
 
-Plugins run code, so they load only when the reviewed tree is trusted: in local reviews, never on pull requests or under `--no-repo-config`. The platform-neutral rules of the review conversation (who may dismiss, what counts as fixed, how the summary reads) live once in `vcs-platform`, with a conformance suite every platform adapter runs. [Plugins guide](docs/manual/en/plugins.mdx), [plugin contract](docs/adr/0006-plugin-contract.md).
+Plugins run code, so they load only when the reviewed tree is trusted: in local reviews, never on pull requests or under `--no-repo-config`. Plugins your ocra Cloud account names load only after `ocra plugins allow <name>@<version>` installed that exact version on the machine, scripts off, and only from there. The platform-neutral rules of the review conversation (who may dismiss, what counts as fixed, how the summary reads) live once in `vcs-platform`, with a conformance suite every platform adapter runs. [Plugins guide](docs/manual/en/plugins.mdx), [plugin contract](docs/adr/0006-plugin-contract.md).
 
-ocra is a library first: `review()` from `@open-cr-agent/core` runs the same pipeline the command runs, from your own program, bot or service, with the plugins you choose. [Embedding ocra](docs/manual/en/embedding.mdx) is the contract page.
+ocra is a library first: `review()` from `@open-cr-agent/core` runs the same pipeline the command runs, from your own program, bot or service, with the plugins you choose. Its errors carry a stable code (`OcraError`). Each package exports a curated public API, recorded in [`etc/`](etc/) and checked in CI; [Embedding ocra](docs/manual/en/embedding.mdx) is the contract page.
 
 ## Security model
 
@@ -185,7 +185,7 @@ Assume the reviewed code is hostile; ocra does.
 
 Numbers are published with their limits, and only numbers that were measured. Today: one run on 16 golden cases, with recall the weak point, on one model family; a second model spot-checked the labels. Two identical runs on ten benchmark pull requests differ by 20 points of precision, so the sample cannot yet decide prompt changes, and prompts stay frozen until it can. [Measured quality](docs/manual/en/quality.mdx).
 
-`ocra-eval` replays [AACR-Bench](https://github.com/alibaba/aacr-bench) (200 real pull requests, 1,505 expert-verified comments) and ocra's own golden set, and reports precision, recall, F1, cost and latency. The free `ceiling` command shows what the deterministic stages can reach at all. [Evaluation guide](docs/manual/en/evaluation.mdx).
+`ocra-eval` replays [AACR-Bench](https://github.com/alibaba/aacr-bench) (200 real pull requests, 1,505 expert-verified comments) and ocra's own golden set, and reports precision, recall, F1, cost and latency. Reviews run at a fixed temperature and seed, every report records the ocra version, prompt and configuration hashes and the sampling applied, and `--repeat k` gives each metric a 95% confidence interval, so `compare` calls a change better only when the intervals separate. The free `ceiling` command shows what the deterministic stages can reach at all. [Evaluation guide](docs/manual/en/evaluation.mdx).
 
 ## Where it is going
 
@@ -196,12 +196,15 @@ ocra's long-term position is the engine other review agents are built on, not an
 | M1–M4 | Pipeline, reviewers, GitHub, incremental re-review, failover, memory | built |
 | M7–M9 | On npm with provenance; untrusted-PR hardening; GitLab, SARIF, container image, declared providers (0.2.0) | built |
 | M5–M6 | A quality number that can decide changes; recall without losing precision | paused until model credit |
-| M10 | Contracts: a Finding specification, a public `review()` entry, a second runtime with a conformance suite, SARIF in | next |
-| M11–M13 | Evidence (a nightly live test, per-reviewer numbers), operability (organization policy, run ids, metrics), external use | year one |
+| M10 | Contracts: a Finding specification, a public `review()` entry, a second runtime with a conformance suite, SARIF in | mostly built; the reviewer entity and sinks remain |
+| M14 | ocra Cloud ([ADR-0024](docs/adr/0024-ocra-cloud.md)): login, your own key behind a model gateway, a web view of reviews, account configuration and opt-in findings; then a hosted GitHub App | Phase 1 built and released (0.5.0); Phase 2 deferred |
+| M11–M13 | Evidence (a nightly live test, per-reviewer numbers), operability (organization policy, run ids, metrics), external use | in progress; external use starts now |
 
 The plan, the reasoning and what is deliberately not built: [roadmap](docs/roadmap.md).
 
 ## Packages
+
+To use ocra you install one package, `@open-cr-agent/cli`; it brings the others it needs. The rest are listed for people who embed the engine or build on its contracts.
 
 | Package | Responsibility |
 |---|---|
@@ -212,6 +215,7 @@ The plan, the reasoning and what is deliberately not built: [roadmap](docs/roadm
 | `@open-cr-agent/vcs-github` | `VcsAdapter` for GitHub pull requests |
 | `@open-cr-agent/vcs-gitlab` | `VcsAdapter` for GitLab merge requests |
 | `@open-cr-agent/vcs-local` | `VcsAdapter` for the local git repository |
+| `@open-cr-agent/cloud-contract` | The wire contract with ocra Cloud (Zod schemas, limits, vocabularies, error codes, the redaction pass); installed with the CLI, not used directly |
 | `@open-cr-agent/cli` | The `ocra` command |
 | `@open-cr-agent/eval` | Benchmark replay and quality metrics |
 
@@ -224,7 +228,7 @@ npm link --workspace @open-cr-agent/cli   # ocra from this checkout
 npm run verify                            # Biome, type check and tests (no model, no network)
 ```
 
-Rules for humans and agents, the same ones CI enforces: [AGENTS.md](AGENTS.md). Releases: [docs/releasing.md](docs/releasing.md), [CHANGELOG.md](CHANGELOG.md). State and next steps for whoever picks the project up: [docs/handoff.md](docs/handoff.md).
+Rules for humans and agents, the same ones CI enforces: [AGENTS.md](AGENTS.md). Releases: [CHANGELOG.md](CHANGELOG.md); a change users see adds a changeset ([.changeset/README.md](.changeset/README.md)).
 
 ## Contributing and security
 

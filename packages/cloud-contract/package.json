@@ -1,0 +1,43 @@
+{
+  "name": "@open-cr-agent/cloud-contract",
+  "version": "0.5.0",
+  "description": "The wire contract between Open-CR-Agent and ocra Cloud: Zod schemas, limits, vocabularies, the redaction pass and its test vectors",
+  "keywords": [
+    "code-review",
+    "zod",
+    "schema"
+  ],
+  "license": "Apache-2.0",
+  "homepage": "https://ocracloud.com",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jma49/Open-CR-Agent.git",
+    "directory": "packages/cloud-contract"
+  },
+  "bugs": "https://github.com/jma49/Open-CR-Agent/issues",
+  "engines": {
+    "node": ">=22.19"
+  },
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "@open-cr-agent/source": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./fixtures/*": "./fixtures/*",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "fixtures",
+    "!dist/**/*.map"
+  ],
+  "dependencies": {
+    "zod": "^4.6.5"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

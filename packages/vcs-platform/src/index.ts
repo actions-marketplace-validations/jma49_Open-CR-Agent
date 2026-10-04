@@ -1,6 +1,37 @@
-export * from "./neutralize.js";
-export * from "./platform.js";
-export * from "./render.js";
-export * from "./retry.js";
-export * from "./review.js";
-export * from "./state.js";
+// The review conversation every platform adapter shares (ADR-0016), for
+// ocra's own adapters. Not a contract yet: a minor release may change it.
+
+export {
+  changeRequestSchema,
+  codeSourceSchema,
+  commitIdSchema,
+  fetchSchema,
+  historySchema,
+} from "./options.js";
+export type {
+  Bot,
+  InlineFinding,
+  PlatformChangeRequest,
+  PlatformComment,
+  PlatformThread,
+  PublishedFindings,
+  ReviewPlatform,
+} from "./platform.js";
+export { MAX_ATTEMPTS, type RetryDecision, retryDecision } from "./retry.js";
+export {
+  type CodeSource,
+  type History,
+  PlatformReview,
+  type PlatformReviewOptions,
+} from "./review.js";
+export {
+  githubSuggestion,
+  gitlabSuggestion,
+  type SuggestionFence,
+} from "./suggestion.js";
+export type {
+  ChangeRequestRef,
+  LocalCode,
+  PlatformTarget,
+  ResolveTargetOptions,
+} from "./target.js";

@@ -1,12 +1,13 @@
+import type { SpendTracker } from "../agent/budget.js";
+import { parseJsonAnswer } from "../agent/json.js";
+import { mapWithConcurrency } from "../agent/pool.js";
+import { type AgentCallSettings, agentCall } from "../agent/settings.js";
 import type { AgentRuntime, ReviewContext, Usage } from "../contracts.js";
 import type { FileDiff, Finding, Verification } from "../domain.js";
-import { errorMessage, usageSpent } from "../errors.js";
-import type { SpendTracker } from "../pipeline/budget.js";
-import { parseJsonAnswer } from "../pipeline/helpers.js";
-import { mapWithConcurrency } from "../pipeline/pool.js";
+import { errorMessage, OcraError, usageSpent } from "../errors.js";
 import { buildVerificationPrompt, fileExcerpt, verificationResponseSchema } from "./prompt.js";
 
-export const VERIFY_TIMEOUT_MS = 120_000;
+const VERIFY_TIMEOUT_MS = 120_000;
 
 export interface RefutedFinding {
   fingerprint: string;
@@ -37,6 +38,7 @@ export interface VerifyOptions {
   // Files are not sent once the run's spend limit is used up; their findings
   // stay, unchecked.
   budget?: Pick<SpendTracker, "exhausted" | "add">;
+  call?: AgentCallSettings | undefined;
 }
 
 // Precision without losing recall to doubt: a finding is dropped only when
@@ -87,6 +89,7 @@ export async function verifyFindings(
       const answer = await complete(
         {
           tier: "standard",
+          ...agentCall("verifier", options.call),
           system: prompt.system,
           user: prompt.user,
           timeoutMs: VERIFY_TIMEOUT_MS,
@@ -96,7 +99,8 @@ export async function verifyFindings(
       result.usage.push(answer.usage);
       options.budget?.add(answer.usage);
       const parsed = verificationResponseSchema.safeParse(parseJsonAnswer(answer.text));
-      if (!parsed.success) throw new Error("the verifier returned an invalid response");
+      if (!parsed.success)
+        throw new OcraError("RUNTIME_INVALID_OUTPUT", "the verifier returned an invalid response");
       for (const entry of parsed.data) {
         const { index } = entry;
         if (index < 0 || index >= group.length) continue;

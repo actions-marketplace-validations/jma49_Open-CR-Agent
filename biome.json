@@ -7,7 +7,8 @@
       "!**/node_modules",
       "!**/*.tsbuildinfo",
       "!evals/golden/*.json",
-      "!docs/schema/*.json"
+      "!docs/schema/*.json",
+      "!**/__snapshots__"
     ]
   },
   "formatter": {
@@ -17,12 +18,30 @@
   },
   "linter": {
     "rules": {
-      "preset": "recommended"
+      "preset": "recommended",
+      "style": {
+        "noDefaultExport": "error",
+        "noParameterProperties": "error",
+        "noNonNullAssertion": "error"
+      }
     }
   },
   "vcs": {
     "enabled": true,
     "clientKind": "git",
     "useIgnoreFile": true
-  }
+  },
+  "plugins": ["./biome-plugins/error-casts.grit"],
+  "overrides": [
+    {
+      "includes": ["vitest.config.ts", "commitlint.config.mjs"],
+      "linter": {
+        "rules": {
+          "style": {
+            "noDefaultExport": "off"
+          }
+        }
+      }
+    }
+  ]
 }

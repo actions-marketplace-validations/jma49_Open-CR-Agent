@@ -1,18 +1,30 @@
+import { z } from "zod";
 import type { AttackSummary } from "./attack-score.js";
 import type { GoldenSummary } from "./golden-score.js";
+import { type ProvenanceSummary, renderProvenance } from "./provenance.js";
 import type { Summary } from "./score.js";
 
-export type RunSummary = Summary & { golden?: GoldenSummary; attacks?: AttackSummary };
+export type RunSummary = Summary & {
+  golden?: GoldenSummary;
+  attacks?: AttackSummary;
+  provenance?: ProvenanceSummary;
+};
 
-export interface RunInfo {
-  runId: string;
-  createdAt: string;
-  selection: Record<string, unknown>;
-  models: Record<string, string | undefined>;
-  judge: string;
+export const runInfoSchema = z.strictObject({
+  runId: z.string(),
+  createdAt: z.string(),
+  selection: z.record(z.string(), z.unknown()),
+  models: z.record(z.string(), z.string().optional()),
+  judge: z.string(),
   // What every review was passed besides the range and the format.
-  review?: string[];
-}
+  review: z.array(z.string()).exactOptional(),
+  // The sampling asked of every review; what each applied is in the
+  // summary's provenance.
+  sampling: z
+    .strictObject({ temperature: z.number().exactOptional(), seed: z.int().exactOptional() })
+    .exactOptional(),
+});
+export type RunInfo = z.output<typeof runInfoSchema>;
 
 const pct = (value: number) => `${(value * 100).toFixed(1)}%`;
 
@@ -26,6 +38,7 @@ export function renderMarkdown(info: RunInfo, summary: RunSummary): string {
     `- Models: ${JSON.stringify(info.models)}`,
     `- Judge: ${info.judge}`,
     ...(info.review ? [`- Review flags: ${info.review.join(" ")}`] : []),
+    `- Provenance: ${renderProvenance(summary.provenance)}`,
     `- Instances: ${summary.instances.reviewed} reviewed, ${summary.instances.failed} failed, ${summary.instances.unavailable} unavailable in the dataset, ${summary.instances.skippedBudget} skipped for budget, ${summary.instances.skippedQuota} skipped for spent quota (of ${summary.instances.selected})`,
     "",
     summary.golden ? "## Quality, benchmark matching (ignores labels)" : "## Quality",

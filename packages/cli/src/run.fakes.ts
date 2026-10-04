@@ -1,9 +1,8 @@
-import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { writeFileSync } from "node:fs";
 import type { AgentEvent, AgentTaskSpec, OcraPlugin } from "@open-cr-agent/core";
-import { BUILTIN_PLUGINS, type ReviewDeps } from "./review/command.js";
+import { scratchRepos } from "@open-cr-agent/test-support";
+import type { ReviewDeps } from "./commands/review/deps.js";
+import { BUILTIN_PLUGINS } from "./commands/review.js";
 
 // Fakes shared by the CLI's end-to-end tests: a scratch repository with one
 // change, captured output, and dependencies with a scripted runtime.
@@ -12,26 +11,17 @@ export function capture() {
   return { write: (chunk: string) => (text += chunk), text: () => text };
 }
 
-const dirs: string[] = [];
+const repos = scratchRepos("ocra-cli-");
 export const disposed = { count: 0 };
 
 // Call from afterEach: removes the repositories made since the last call.
-export function removeRepos(): void {
-  for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
-}
+export const removeRepos = repos.removeAll;
 
 export function repoWithChange(): string {
-  const dir = mkdtempSync(join(tmpdir(), "ocra-cli-"));
-  dirs.push(dir);
-  const git = (...args: string[]) => execFileSync("git", args, { cwd: dir });
-  git("init", "-q", "-b", "main");
-  git("config", "user.email", "test@example.com");
-  git("config", "user.name", "Test");
-  writeFileSync(join(dir, "app.ts"), "export const limit = 10;\n");
-  git("add", "-A");
-  git("commit", "-q", "-m", "init");
-  writeFileSync(join(dir, "app.ts"), "export const limit = 10;\nexport const retries = -1;\n");
-  return dir;
+  const repo = repos.create();
+  repo.commit("init", { "app.ts": "export const limit = 10;\n" });
+  repo.write("app.ts", "export const limit = 10;\nexport const retries = -1;\n");
+  return repo.dir;
 }
 
 export type Script = (spec: AgentTaskSpec) => AsyncIterable<AgentEvent>;
@@ -74,7 +64,8 @@ export function deps(
   return {
     cwd,
     env: {},
-    builtinPlugins: BUILTIN_PLUGINS.map((p) => (p.name === fakeRuntime.name ? fakeRuntime : p)),
+    builtinPlugins: BUILTIN_PLUGINS,
+    runtimes: { opencode: async () => fakeRuntime },
     writeFile: async (path, content) => writeFileSync(path, content),
     now: Date.now,
     heartbeatMs: 60_000,

@@ -1,15 +1,18 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { type PlanOutput, parseUnifiedDiff, type RiskTier } from "@open-cr-agent/core";
+import { type CliPlanOutput, cliPlanOutputSchema } from "@open-cr-agent/cli/internal";
+import type { RiskTier } from "@open-cr-agent/core";
+import { errorMessage } from "@open-cr-agent/core";
+import { parseUnifiedDiff } from "@open-cr-agent/core/internal";
 import {
   classifyReferences,
   type ReferenceReach,
   renderCeiling,
   summarizeCeiling,
 } from "./ceiling.js";
-import type { Dataset, Instance } from "./dataset.js";
-import { exec } from "./exec.js";
+import { benchmarkEnv, exec } from "./exec.js";
 import { untouchedPaths } from "./golden.js";
+import type { Dataset, Instance } from "./instance.js";
 import { prepareRepository, UnavailableCommitError } from "./repos.js";
 
 export interface CeilingOptions {
@@ -67,7 +70,7 @@ export async function measureCeiling(
       options.log(`${label}: ${instance.references.length} issue(s) classified`);
     } catch (error) {
       const kind = error instanceof UnavailableCommitError ? "unavailable" : "failed";
-      options.log(`${label}: ${kind}: ${(error as Error).message.split("\n")[0]}`);
+      options.log(`${label}: ${kind}: ${errorMessage(error).split("\n")[0]}`);
     }
   }
 
@@ -86,7 +89,7 @@ async function plan(
   dir: string,
   instance: Instance,
   command: readonly string[],
-): Promise<PlanOutput> {
+): Promise<CliPlanOutput> {
   const [bin, ...prefix] = command;
   if (!bin) throw new Error("ocra command is empty");
   const result = await exec(
@@ -103,8 +106,8 @@ async function plan(
       "--to",
       instance.headCommit,
     ],
-    { cwd: dir, timeoutMs: 5 * 60_000 },
+    { cwd: dir, timeoutMs: 5 * 60_000, env: benchmarkEnv() },
   );
   if (result.exitCode !== 0) throw new Error(result.stderr.trim() || `exit ${result.exitCode}`);
-  return JSON.parse(result.stdout) as PlanOutput;
+  return cliPlanOutputSchema.parse(JSON.parse(result.stdout));
 }

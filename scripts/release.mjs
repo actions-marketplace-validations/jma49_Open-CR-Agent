@@ -1,41 +1,36 @@
 #!/usr/bin/env node
-// Release tooling for the workspace packages. docs/releasing.md is the
-// runbook. The maintainer runs `publish`; .github/workflows/release.yml
-// splits the same work into `pack`, which runs the build and the tests, and
-// `upload`, which runs nothing but npm where a publish token can be minted;
-// between the two, another job installs the tarballs and runs them.
+// Publishing the workspace packages. The release runbook is in the maintainers' private notes.
+// Changesets sets the version (npm run version-packages); this script, not
+// `changeset publish`, publishes, because the release workflow must publish
+// exactly the tarballs it tested, checked by digest. The maintainer runs
+// `publish`; .github/workflows/release.yml splits the same work into `pack`,
+// which runs the build and the tests, and `upload`, which runs nothing but
+// npm where a publish token can be minted; between the two, another job
+// installs the tarballs and runs them. It imports only node: modules and
+// the two dependency-free libraries next to it.
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import {
-  appendFileSync,
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { releaseNotes } from "./lib/changelog.mjs";
 import {
   atLeast,
-  changelogSection,
   digestProblem,
   distTag,
-  isVersion,
   lockstep,
   parseDigests,
   publishOrder,
   readWorkspaces,
   refProblem,
   tarballName,
-  withVersion,
-} from "./release-lib.mjs";
+} from "./lib/release.mjs";
+
+/** @typedef {import("./lib/release.mjs").Workspace} Workspace */
+/** @typedef {(reason: string) => void} Refuse */
 
 const USAGE = `Usage:
-  node scripts/release.mjs version <x.y.z>           set one version on every package and the lockfile
-  node scripts/release.mjs notes <x.y.z>             print that version's section of CHANGELOG.md
   node scripts/release.mjs publish                   dry run: every check, then npm publish --dry-run
   node scripts/release.mjs publish --publish         check, build and publish what the registry lacks
   node scripts/release.mjs pack <dir>                (CI) verify, build and pack every package into <dir>
@@ -48,18 +43,30 @@ const TRUSTED_PUBLISHING_NPM = "11.5.1";
 const root = fileURLToPath(new URL("..", import.meta.url));
 const ci = process.env.GITHUB_ACTIONS === "true";
 
+/**
+ * @param {string} message
+ * @returns {never}
+ */
 function stop(message, code = 1) {
   console.error(message);
   process.exit(code);
 }
 
 // Runs with the output shown; true when the command succeeded.
+/**
+ * @param {string} command
+ * @param {string[]} args
+ */
 function step(command, args, cwd = root) {
   const where = cwd === root ? "" : `  (in ${relative(root, cwd)})`;
   console.log(`\n$ ${command} ${args.join(" ")}${where}`);
   return spawnSync(command, args, { cwd, stdio: "inherit" }).status === 0;
 }
 
+/**
+ * @param {string} command
+ * @param {string[]} args
+ */
 function capture(command, args, cwd = root) {
   const result = spawnSync(command, args, { cwd, encoding: "utf8" });
   return {
@@ -82,16 +89,20 @@ function packages() {
   if (problems.length > 0) {
     stop(
       `release: the packages are not at one version:\n  ${problems.join("\n  ")}\n` +
-        "Run node scripts/release.mjs version <x.y.z>.",
+        "Version them with npm run version-packages.",
     );
   }
-  return { version, order: publishOrder(workspaces) };
+  // Lockstep with no problems: the published packages share one version.
+  return { version: /** @type {string} */ (version), order: publishOrder(workspaces) };
 }
 
 // Why this run must not publish. A strict run stops at the first reason; a
 // dry run reports each one, carries on, and fails at the end.
+/** @param {boolean} strict */
 function refusals(strict) {
+  /** @type {string[]} */
   const reasons = [];
+  /** @type {Refuse} */
   const refuse = (reason) => {
     if (strict) stop(`release: not publishing: ${reason}`);
     reasons.push(reason);
@@ -101,9 +112,13 @@ function refusals(strict) {
 }
 
 // The release commit has notes, is committed, and is on main.
+/**
+ * @param {string} version
+ * @param {Refuse} refuse
+ */
 function checkSource(version, refuse) {
-  if (!changelogSection(readChangelog(), version)) {
-    refuse(`CHANGELOG.md has no "## ${version}" section`);
+  if (!releaseNotes(readChangelog(), version)) {
+    refuse(`CHANGELOG.md has no "## [${version}] - <date>" section`);
   }
   const status = capture("git", ["status", "--porcelain", "--untracked-files=all"]);
   if (!status.ok || status.out !== "")
@@ -116,6 +131,11 @@ function checkSource(version, refuse) {
 }
 
 // In CI: the ref matches the version, and npm is new enough for OIDC.
+/**
+ * @param {string} version
+ * @param {boolean} publishing
+ * @param {Refuse} refuse
+ */
 function checkCi(version, publishing, refuse) {
   if (!ci) return;
   const ref = { type: process.env.GITHUB_REF_TYPE, name: process.env.GITHUB_REF_NAME };
@@ -138,11 +158,18 @@ function checkPackages() {
 }
 
 // Packs each package into dir. Returns why it stopped, if it did.
+/**
+ * @param {Workspace[]} list
+ * @param {string} version
+ * @param {string} dir
+ */
 function pack(list, version, dir) {
   mkdirSync(dir, { recursive: true });
   for (const w of list) {
     const packed = capture("npm", ["pack", "--json", "--pack-destination", dir], w.dir);
-    const filename = packed.ok ? parseJson(packed.out)?.[0]?.filename : undefined;
+    /** @param {string} out */
+    const report = (out) => /** @type {{ filename?: unknown }[] | undefined} */ (parseJson(out));
+    const filename = packed.ok ? report(packed.out)?.[0]?.filename : undefined;
     if (filename !== tarballName(w.json.name, version)) {
       return `release: packing ${w.json.name} failed:\n${packed.err || packed.out}`;
     }
@@ -152,6 +179,11 @@ function pack(list, version, dir) {
 }
 
 // Each tarball's sha512, in the form npm uses for integrity.
+/**
+ * @param {Workspace[]} list
+ * @param {string} version
+ * @param {string} dir
+ */
 function digests(list, version, dir) {
   return Object.fromEntries(
     list.map((w) => {
@@ -166,6 +198,10 @@ function digests(list, version, dir) {
 
 // Whether the registry has this version. An answer other than the version
 // or "not found" (network or registry errors) stops the run.
+/**
+ * @param {string} name
+ * @param {string} version
+ */
 function published(name, version) {
   const view = capture("npm", ["view", `${name}@${version}`, "version", "--json"]);
   if (view.ok) return view.out !== "";
@@ -173,6 +209,10 @@ function published(name, version) {
   return stop(`release: could not ask the registry about ${name}@${version}:\n${view.err}`);
 }
 
+/**
+ * @param {Workspace[]} order
+ * @param {string} version
+ */
 function pending(order, version) {
   console.log("");
   const todo = order.filter((w) => !published(w.json.name, version));
@@ -183,6 +223,10 @@ function pending(order, version) {
   return todo;
 }
 
+/**
+ * @param {string} text
+ * @returns {unknown}
+ */
 function parseJson(text) {
   try {
     return JSON.parse(text);
@@ -194,12 +238,24 @@ function parseJson(text) {
 // The manifest inside a tarball. npm publishes the name and version written
 // there, whatever the file is called, and the tarballs CI publishes were
 // packed by another job.
+/**
+ * @param {string} tarball
+ * @returns {{ name?: unknown, version?: unknown } | undefined}
+ */
 function manifestOf(tarball) {
   const read = capture("tar", ["-xzOf", tarball, "package/package.json"]);
-  return read.ok ? parseJson(read.out) : undefined;
+  return read.ok
+    ? /** @type {{ name?: unknown, version?: unknown }} */ (parseJson(read.out))
+    : undefined;
 }
 
 // Publishes the tarballs in order. Returns why it stopped, if it did.
+/**
+ * @param {Workspace[]} todo
+ * @param {string} version
+ * @param {string} dir
+ * @param {boolean} real
+ */
 function upload(todo, version, dir, real) {
   const tag = distTag(version);
   for (const [i, w] of todo.entries()) {
@@ -223,27 +279,7 @@ function upload(todo, version, dir, real) {
   return undefined;
 }
 
-function setVersion(version) {
-  if (!isVersion(version)) stop(USAGE, 2);
-  for (const { dir, json } of withVersion(readWorkspaces(root), version)) {
-    writeFileSync(join(dir, "package.json"), `${JSON.stringify(json, null, 2)}\n`);
-  }
-  if (!step("npm", ["install", "--package-lock-only", "--no-audit", "--no-fund"])) {
-    stop("release: updating package-lock.json failed");
-  }
-  console.log(`\nEvery workspace package is now ${version}.`);
-  if (!changelogSection(readChangelog(), version)) {
-    console.log(`Add a "## ${version}" section to CHANGELOG.md before releasing.`);
-  }
-}
-
-function printNotes(version) {
-  if (!isVersion(version)) stop(USAGE, 2);
-  const notes = changelogSection(readChangelog(), version);
-  if (!notes) stop(`release: CHANGELOG.md has no "## ${version}" section`);
-  process.stdout.write(`${notes}\n`);
-}
-
+/** @param {boolean} real */
 function publishCommand(real) {
   const { version, order } = packages();
   const { reasons, refuse } = refusals(real);
@@ -273,12 +309,13 @@ function publishCommand(real) {
   console.log(`\nEvery package is on the registry at ${version} (from ${head}).`);
   if (!ci) {
     console.log(
-      "Next, per docs/releasing.md: trusted publishing after the first release, then the GitHub release:\n" +
-        `  node scripts/release.mjs notes ${version} | gh release create v${version} --target ${head} --title v${version} --notes-file -`,
+      "Next, per the release runbook: trusted publishing after the first release, then the GitHub release:\n" +
+        `  node scripts/changelog.mjs notes ${version} | gh release create v${version} --target ${head} --title v${version} --notes-file -`,
     );
   }
 }
 
+/** @param {string} dir */
 function packCommand(dir) {
   const { version, order } = packages();
   const { refuse } = refusals(true);
@@ -300,6 +337,10 @@ function packCommand(dir) {
   }
 }
 
+/**
+ * @param {string} dir
+ * @param {boolean} real
+ */
 function uploadCommand(dir, real) {
   const { version, order } = packages();
   const { refuse } = refusals(true);
@@ -324,11 +365,13 @@ function uploadCommand(dir, real) {
 
 const [command, ...args] = process.argv.slice(2);
 const publishFlag = args.at(-1) === "--publish";
-if (command === "version" && args.length === 1) setVersion(args[0]);
-else if (command === "notes" && args.length === 1) printNotes(args[0]);
-else if (command === "publish" && args.length === (publishFlag ? 1 : 0))
-  publishCommand(publishFlag);
-else if (command === "pack" && args.length === 1 && !publishFlag) packCommand(args[0]);
-else if (command === "upload" && args.length === (publishFlag ? 2 : 1) && args[0] !== "--publish") {
-  uploadCommand(args[0], publishFlag);
+if (command === "publish" && args.length === (publishFlag ? 1 : 0)) publishCommand(publishFlag);
+else if (command === "pack" && args.length === 1 && !publishFlag) {
+  packCommand(/** @type {string} */ (args[0]));
+} else if (
+  command === "upload" &&
+  args.length === (publishFlag ? 2 : 1) &&
+  args[0] !== "--publish"
+) {
+  uploadCommand(/** @type {string} */ (args[0]), publishFlag);
 } else stop(USAGE, 2);

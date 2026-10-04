@@ -245,6 +245,30 @@
           "suggestion": {
             "type": "string"
           },
+          "fix": {
+            "type": "object",
+            "properties": {
+              "startLine": {
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991
+              },
+              "endLine": {
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991
+              },
+              "replacement": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "startLine",
+              "endLine",
+              "replacement"
+            ],
+            "additionalProperties": false
+          },
           "evidence": {
             "type": "array",
             "items": {
@@ -346,6 +370,13 @@
           },
           "added": {
             "type": "string"
+          },
+          "source": {
+            "type": "string",
+            "enum": [
+              "repository",
+              "account"
+            ]
           }
         },
         "required": [
@@ -486,6 +517,9 @@
                   "uncertain",
                   "unchecked"
                 ]
+              },
+              "reviewer": {
+                "type": "string"
               }
             },
             "required": [
@@ -527,6 +561,9 @@
                   "uncertain",
                   "unchecked"
                 ]
+              },
+              "reviewer": {
+                "type": "string"
               }
             },
             "required": [
@@ -568,6 +605,9 @@
                   "uncertain",
                   "unchecked"
                 ]
+              },
+              "reviewer": {
+                "type": "string"
               }
             },
             "required": [
@@ -609,6 +649,9 @@
                   "uncertain",
                   "unchecked"
                 ]
+              },
+              "reviewer": {
+                "type": "string"
               }
             },
             "required": [
@@ -650,6 +693,9 @@
                   "uncertain",
                   "unchecked"
                 ]
+              },
+              "reviewer": {
+                "type": "string"
               }
             },
             "required": [
@@ -868,6 +914,149 @@
       },
       "required": [
         "usd"
+      ],
+      "additionalProperties": false
+    },
+    "provenance": {
+      "type": "object",
+      "properties": {
+        "ocraVersion": {
+          "type": "string"
+        },
+        "promptHash": {
+          "type": "string"
+        },
+        "configHash": {
+          "type": "string"
+        },
+        "sampling": {
+          "type": "object",
+          "properties": {
+            "temperature": {
+              "type": "number"
+            },
+            "seed": {
+              "type": "integer",
+              "minimum": -9007199254740991,
+              "maximum": 9007199254740991
+            },
+            "notApplied": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": [
+                  "temperature",
+                  "seed"
+                ]
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        "agents": {
+          "type": "object",
+          "propertyNames": {
+            "type": "string"
+          },
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "tier": {
+                "type": "string",
+                "enum": [
+                  "top",
+                  "standard",
+                  "light"
+                ]
+              },
+              "models": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "effort": {
+                "type": "string",
+                "enum": [
+                  "none",
+                  "minimal",
+                  "low",
+                  "medium",
+                  "high"
+                ]
+              },
+              "applied": {
+                "type": "boolean"
+              },
+              "notApplied": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "temperature",
+                    "seed"
+                  ]
+                }
+              }
+            },
+            "required": [
+              "tier"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "rules": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "rule": {
+                "type": "string"
+              },
+              "source": {
+                "type": "string",
+                "enum": [
+                  "repository",
+                  "shared",
+                  "account",
+                  "plugin"
+                ]
+              }
+            },
+            "required": [
+              "path",
+              "rule"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "accountSettings": {
+          "type": "object",
+          "properties": {
+            "version": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "version"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "ocraVersion",
+        "promptHash",
+        "configHash",
+        "sampling"
       ],
       "additionalProperties": false
     },

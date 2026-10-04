@@ -1,12 +1,21 @@
 import { writeFile } from "node:fs/promises";
 import { parseArgs } from "node:util";
-import { errorMessage } from "@open-cr-agent/core";
-import { memoryCommand } from "./memory.js";
-import { metricsCommand } from "./metrics.js";
-import { parseReviewArgs, REVIEW_USAGE, UsageError } from "./review/args.js";
-import { BUILTIN_PLUGINS, EXIT, type ReviewDeps, reviewCommand } from "./review/command.js";
-import type { Output } from "./review/progress.js";
-import { forTerminal } from "./review/terminal.js";
+import { errorMessage, isOcraError } from "@open-cr-agent/core";
+import { defaultCloudDeps } from "./cloud/deps.js";
+import { LOGIN_USAGE, loginCommand } from "./commands/login.js";
+import { memoryCommand } from "./commands/memory.js";
+import { metricsCommand } from "./commands/metrics.js";
+import { PLUGINS_USAGE, pluginsCommand } from "./commands/plugins.js";
+import { parseReviewArgs, REVIEW_USAGE } from "./commands/review/args.js";
+import type { ReviewDeps } from "./commands/review/deps.js";
+import { BUILTIN_RUNTIMES } from "./commands/review/runtimes.js";
+import { BUILTIN_PLUGINS, reviewCommand } from "./commands/review.js";
+import { EXIT } from "./io/exit.js";
+import type { Output } from "./io/output.js";
+import { forTerminal } from "./io/terminal.js";
+import { UsageError } from "./io/usage-error.js";
+import { defaultNpm } from "./plugins/npm.js";
+import { pluginsDir } from "./plugins/store.js";
 import { VERSION } from "./version.js";
 
 const USAGE = `Usage: ocra <command> [options]
@@ -15,6 +24,10 @@ Commands:
   review      Review code changes (run "ocra review --help" for options)
   memory      Remember findings the team accepts (run "ocra memory --help")
   metrics     Counts over past reviews: runs, cost, findings, per reviewer (run "ocra metrics --help")
+  plugins     Allow plugins your ocra Cloud settings name on this machine (run "ocra plugins --help")
+  login       Sign in to ocra Cloud (in development; run "ocra login --help")
+  logout      Sign out of ocra Cloud
+  whoami      Show the ocra Cloud account
 
 Options:
   -h, --help     Show help
@@ -26,7 +39,9 @@ export function defaultDeps(): ReviewDeps {
     cwd: process.cwd(),
     env: process.env,
     builtinPlugins: BUILTIN_PLUGINS,
+    runtimes: BUILTIN_RUNTIMES,
     writeFile: (path, content) => writeFile(path, content, "utf8"),
+    cloud: defaultCloudDeps(process.env),
     now: Date.now,
     heartbeatMs: 30_000,
     onInterrupt(handler) {
@@ -60,7 +75,29 @@ export async function run(
         ? await memoryCommand(rest, out, deps.cwd)
         : await metricsCommand(rest, out, deps.cwd);
     } catch (error) {
-      err.write(`ocra: ${forTerminal(errorMessage(error))}\n`);
+      err.write(failure(error));
+      return EXIT.error;
+    }
+  }
+  if (command === "plugins") {
+    try {
+      return await pluginsCommand(rest, out, {
+        dir: pluginsDir(deps.env),
+        npm: deps.npm ?? defaultNpm(),
+      });
+    } catch (error) {
+      if (error instanceof UsageError) {
+        err.write(`${error.message ? `${error.message}\n\n` : ""}${PLUGINS_USAGE}`);
+      } else err.write(failure(error));
+      return EXIT.error;
+    }
+  }
+  if (command === "login" || command === "logout" || command === "whoami") {
+    try {
+      return await loginCommand(command, rest, out, err, defaultCloudDeps(deps.env));
+    } catch (error) {
+      if (error instanceof UsageError) err.write(`${error.message}\n\n${LOGIN_USAGE}`);
+      else err.write(failure(error));
       return EXIT.error;
     }
   }
@@ -100,8 +137,14 @@ async function review(argv: string[], out: Output, err: Output, deps: ReviewDeps
     if (error instanceof UsageError) {
       err.write(`${error.message}\n\n${REVIEW_USAGE}`);
     } else {
-      err.write(`ocra: ${forTerminal(errorMessage(error))}\n`);
+      err.write(failure(error));
     }
     return EXIT.error;
   }
+}
+
+// The code is what a script may match on; the message is for people.
+function failure(error: unknown): string {
+  const code = isOcraError(error) ? ` [${error.code}]` : "";
+  return `ocra${code}: ${forTerminal(errorMessage(error))}\n`;
 }

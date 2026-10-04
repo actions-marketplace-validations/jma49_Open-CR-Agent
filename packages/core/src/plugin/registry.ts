@@ -1,8 +1,10 @@
-import type { AgentRuntime, VcsAdapter } from "../contracts.js";
-import { errorMessage } from "../errors.js";
-import type { ReviewEvent } from "../pipeline/report.js";
+import { AGENT_ROLES } from "../agent/settings.js";
+import type { AgentRuntime } from "../contracts.js";
+import { errorMessage, OcraError } from "../errors.js";
+import type { ReviewEvent } from "../report/report.js";
 import type { ReviewerDefinition } from "../review/reviewer.js";
 import type { RepoRule } from "../rules/repo-rules.js";
+import type { VcsAdapter } from "../vcs.js";
 import type {
   PluginSummary,
   RuntimeFactory,
@@ -11,7 +13,12 @@ import type {
   VcsFactory,
 } from "./types.js";
 
-export class PluginError extends Error {}
+export class PluginError extends OcraError {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super("PLUGIN_INVALID", message, options);
+    this.name = "PluginError";
+  }
+}
 
 interface Owned<T> {
   owner: string;
@@ -27,10 +34,13 @@ export class PluginRegistry {
   private readonly listeners: Owned<(event: ReviewEvent) => void>[] = [];
   private frozen = false;
 
-  constructor(
-    private readonly reservedToolNames: ReadonlySet<string>,
-    private readonly warn: (message: string) => void = () => {},
-  ) {}
+  private readonly reservedToolNames: ReadonlySet<string>;
+  private readonly warn: (message: string) => void;
+
+  constructor(reservedToolNames: ReadonlySet<string>, warn: (message: string) => void = () => {}) {
+    this.reservedToolNames = reservedToolNames;
+    this.warn = warn;
+  }
 
   registerVcs(owner: string, name: string, factory: VcsFactory): void {
     this.add(this.vcs, "VCS adapter", owner, name, factory);
@@ -41,6 +51,13 @@ export class PluginRegistry {
   }
 
   registerReviewer(owner: string, reviewer: ReviewerDefinition): void {
+    // Reviewer ids share one namespace with the roles (ADR-0025): settings
+    // and provenance are keyed by either.
+    if ((AGENT_ROLES as readonly string[]).includes(reviewer.id)) {
+      throw new PluginError(
+        `Plugin "${owner}" cannot register reviewer "${reviewer.id}": the name is reserved for a role`,
+      );
+    }
     this.add(this.reviewerMap, "reviewer", owner, reviewer.id, reviewer);
   }
 

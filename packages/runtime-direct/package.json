@@ -1,6 +1,6 @@
 {
   "name": "@open-cr-agent/runtime-direct",
-  "version": "0.2.0",
+  "version": "0.5.0",
   "description": "Agent runtime for Open-CR-Agent that calls OpenAI-compatible endpoints directly",
   "keywords": [
     "code-review",
@@ -8,7 +8,7 @@
     "agents"
   ],
   "license": "Apache-2.0",
-  "homepage": "https://ocra.majincheng.com",
+  "homepage": "https://ocracloud.com",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/jma49/Open-CR-Agent.git",
@@ -19,18 +19,21 @@
     "node": ">=22.19"
   },
   "type": "module",
+  "sideEffects": false,
   "exports": {
     ".": {
+      "@open-cr-agent/source": "./src/index.ts",
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
-    }
+    },
+    "./package.json": "./package.json"
   },
   "files": [
     "dist",
     "!dist/**/*.map"
   ],
   "dependencies": {
-    "@open-cr-agent/core": "0.2.0",
+    "@open-cr-agent/core": "0.5.0",
     "zod": "^4.6.5"
   },
   "publishConfig": {

@@ -52,10 +52,11 @@ OpenCode 自带了与目录里几乎所有供应商通信的代码。只有少�
 - **id**（`gateway`）由你自己取：小写字母、数字和连字符。请选一个 OpenCode 目录里没有的 id，因为声明的供应商会在这次运行中替换同名的已知供应商。
 - **`baseUrl`** 必须是 `https`，或者本机上的普通 `http`：`localhost`、`127.0.0.1` 或 `::1`。比如 Ollama 用 `http://127.0.0.1:11434/v1`。地址里不能有 `{` 或 `}`，OpenCode 会把它们替换成变量或文件内容。
 - **`apiKeyEnv`** 是保存密钥的环境变量的名字。密钥本身从不写进文件，运行时也只拿到这一个变量。平台令牌和云凭据的名字（以 `GITHUB_`、`GITLAB_`、`CI_`、`AWS_`、`AZURE_` 等开头）会被拒绝。不需要密钥的服务可以省略。
+- **`effort`**（可选）说明这个端点怎样接收两种运行时发送的[推理强度](./configuration#推理强度)：`openai` 发送 `reasoning_effort`（默认值，OpenAI、Gemini API 的 OpenAI 兼容端点和 OpenRouter 都接受），`openrouter` 发送 `reasoning: { effort }`。
 - **每个模型都要有价格**，单位是每百万 token 多少美元：`input`、`output`，以及可选的 `cachedInput`。ocra 用它们计算报告里的花费和 `--max-cost-usd`。价格可以写 0，适合跑在你自己硬件上的服务；这时运行会警告该模型没有定价，花费上限也不会计入它。
 - 通过 `extends` 引用的共享配置也可以声明供应商，但必须用 `#sha256=` 固定内容：不固定的话，提供这个文件的人就能把你的代码发到他选的端点。声明了供应商却没有固定的共享文件会被忽略，并给出警告，警告里写着检查过文件之后要加的固定值。仓库里同 id 的声明优先。审查 PR 和 Merge Request 时，供应商和其他配置一样来自 base 提交。
 
-这项功能已经在 CI 里用真实的 OpenCode 二进制文件对一个模拟的 OpenAI 兼容服务测试过：密钥发往该去的地方，价格被计入，而且不需要访问网络上的其他地址。还没有对真实的模型服务测试过。
+这项功能已经在 CI 里用真实的 OpenCode 二进制文件对一个模拟的 OpenAI 兼容服务测试过：密钥发往该去的地方，价格被计入，而且不需要访问网络上的其他地址。对真实服务的运行已经在 OpenRouter 上完成（下文的免费模型，2026-10-02）：密钥送达、工具调用正常、价格按 0 计入。
 
 ## OpenRouter 上的免费模型
 
@@ -84,7 +85,7 @@ OpenCode 自带了与目录里几乎所有供应商通信的代码。只有少�
 - 评测的判定模型也可以用同一个端点：`JUDGE_API_KEY`、`JUDGE_BASE_URL=https://openrouter.ai/api/v1`、`JUDGE_MODEL=stealth/space-bunny-alpha`。
 - 预览就是预览：模型、限额和价格随时可能变，匿名模型也不说明它保留什么。拿它做评测，别拿它审查必须保密的代码。
 
-模型 id 是 OpenRouter 的 API 示例在 2026-10-02 给出的（`stealth/space-bunny-alpha`）；预览模型可能变动，请到模型页面核对。声明端点这条路不需要 OpenCode 的价格目录；目录形式的 `openrouter/<模型>` 需要能访问目录且模型在目录里，否则立刻失败。本仓库还没有通过 OpenRouter 真正跑过一次审查。
+模型 id 是 OpenRouter 的 API 示例在 2026-10-02 给出的（`stealth/space-bunny-alpha`）；预览模型可能变动，请到模型页面核对。声明端点这条路不需要 OpenCode 的价格目录；目录形式的 `openrouter/<模型>` 需要能访问目录且模型在目录里，否则立刻失败。自 2026-10-02 起，已有审查这样经过 OpenRouter 运行。
 
 ## 选择运行时
 
@@ -96,6 +97,8 @@ OpenCode 自带了与目录里几乎所有供应商通信的代码。只有少�
 | `direct` | 只访问 `providers` 下声明的端点，不访问网络上的其他任何地址 | 模型链里的每个模型都在声明的端点上，而且你希望除此之外什么都不访问 |
 
 两者跑的是同一套审查：同样的工具、同样的步数上限、同样的模型链回退、同样的价格。`direct` 运行时会拒绝写了未声明供应商的模型链，并在发出任何请求之前说明。经过代理时它和 ocra 的其他部分一样读取 `HTTP_PROXY`、`HTTPS_PROXY` 和 `NO_PROXY`。[质量页](./quality)上的数字是通过 `opencode` 测得的；`direct` 运行时通过同一套一致性测试，但还没有在黄金用例集上评测过。
+
+`opencode` 运行时是 CLI 的可选依赖，默认会安装。使用 `direct` 时，可以不装它，少约 165 MB：见[不装 OpenCode](./installation#不装-opencode)，以及 [GitHub Action](./github#运行时) 的输入 `opencode: false`。
 
 ## 还会访问哪些网络地址
 

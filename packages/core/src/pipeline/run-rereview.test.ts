@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { PriorFinding } from "../domain.js";
+import type { ReviewReport } from "../report/report.js";
 import { quoteSignature } from "../rereview/quote.js";
-import type { ReviewReport } from "./report.js";
 import { finding, patch, runtime, twoFiles, vcs } from "./run.fakes.js";
 import { review } from "./run.js";
 
@@ -33,7 +33,7 @@ async function reviewWith(
 ) {
   const adapter = vcs(files, twoFiles);
   if (prior) adapter.getPriorReview = async () => ({ findings: prior });
-  return review({ vcs: adapter, runtime: rt, verify: false, judge: false });
+  return review({ vcs: adapter, runtime: rt, stages: { verify: false, judge: false } });
 }
 
 describe("review against the previous review", () => {
@@ -45,8 +45,7 @@ describe("review against the previous review", () => {
     const first = await review({
       vcs: vcs({}, twoFiles),
       runtime: rt,
-      verify: false,
-      judge: false,
+      stages: { verify: false, judge: false },
     });
     const fingerprint = first.findings[0]?.fingerprint ?? "";
     const old = { title: "t", severity: "warning" as const, commented: true };
@@ -60,7 +59,11 @@ describe("review against the previous review", () => {
         { ...old, fingerprint: "gone", file: "src/b.ts", ...(removed ? { quote: removed } : {}) },
       ],
     });
-    const second = await review({ vcs: withPrior, runtime: rt, verify: false, judge: false });
+    const second = await review({
+      vcs: withPrior,
+      runtime: rt,
+      stages: { verify: false, judge: false },
+    });
     expect(second.findings[0]?.status).toBe("unfixed");
     expect(second.rereview?.fixed.map((f) => f.fingerprint)).toEqual(["gone"]);
 
@@ -68,7 +71,11 @@ describe("review against the previous review", () => {
     broken.getPriorReview = async () => {
       throw new Error("HTTP 502");
     };
-    const third = await review({ vcs: broken, runtime: rt, verify: false, judge: false });
+    const third = await review({
+      vcs: broken,
+      runtime: rt,
+      stages: { verify: false, judge: false },
+    });
     expect(third.findings).toHaveLength(1);
     expect(third.rereview).toBeUndefined();
     expect(third.warnings).toContain("could not load the previous review: HTTP 502");
@@ -82,8 +89,7 @@ describe("review against the previous review", () => {
     const first = await review({
       vcs: vcs({}, twoFiles),
       runtime: rt,
-      verify: false,
-      judge: false,
+      stages: { verify: false, judge: false },
     });
     const entry = {
       fingerprint: first.findings[0]?.fingerprint ?? "",
@@ -95,13 +101,47 @@ describe("review against the previous review", () => {
     const second = await review({
       vcs: vcs({}, twoFiles),
       runtime: rt,
-      verify: false,
-      judge: false,
       readTrusted: async (p) => (p === ".ocra/memory.json" ? memory : undefined),
+      stages: { verify: false, judge: false },
     });
     expect(second.findings).toEqual([]);
-    expect(second.remembered).toEqual([entry]);
+    expect(second.remembered).toEqual([{ ...entry, source: "repository" }]);
     expect(rt.specs.at(-1)?.userPrompt).toContain("- src/a.ts: t (accepted: known and accepted)");
+  });
+
+  it("applies the account's memory with the repository's, the repository's first", async () => {
+    const rt = reporting(finding("src/a.ts", "const a = 1;"), finding("src/b.ts", "const b = 2;"));
+    const opts = { vcs: vcs({}, twoFiles), runtime: rt, verify: false, judge: false } as const;
+    const first = await review(opts);
+    const fp = (file: string) => first.findings.find((f) => f.file === file)?.fingerprint ?? "";
+    expect(fp("src/a.ts")).not.toBe(fp("src/b.ts"));
+    const inRepo = { fingerprint: fp("src/a.ts"), file: "src/a.ts", title: "t", reason: "ours" };
+    const memory = JSON.stringify({ accepted: [inRepo] });
+    const second = await review({
+      ...opts,
+      readTrusted: async (p) => (p === ".ocra/memory.json" ? memory : undefined),
+      accountMemory: [
+        { ...inRepo, reason: "also the account's" },
+        { fingerprint: fp("src/b.ts"), file: "src/b.ts", title: "t", reason: "mine" },
+      ],
+    });
+    expect(second.findings).toEqual([]);
+    expect(second.remembered).toEqual(
+      expect.arrayContaining([
+        { ...inRepo, source: "repository" },
+        {
+          fingerprint: fp("src/b.ts"),
+          file: "src/b.ts",
+          title: "t",
+          reason: "mine",
+          source: "account",
+        },
+      ]),
+    );
+    expect(second.remembered).toHaveLength(2);
+    expect(rt.specs.map((s) => s.userPrompt).join("\n")).toContain(
+      "- src/b.ts: t (accepted: mine)",
+    );
   });
 
   it("keeps the verdict when a finding is not reported again but its code is unchanged", async () => {
@@ -177,7 +217,11 @@ describe("review against the previous review", () => {
         changedSince: { head: "h0", files: ["src/b.ts"] },
         tier,
       });
-      return review({ vcs: adapter, runtime: reporting(), verify: false, judge: false });
+      return review({
+        vcs: adapter,
+        runtime: reporting(),
+        stages: { verify: false, judge: false },
+      });
     };
     // The auth path makes this change "full"; the earlier review ran at "trivial".
     const risen = await since("trivial");
@@ -205,7 +249,11 @@ describe("review against the previous review", () => {
       };
       yield { type: "done", taskId: spec.taskId };
     });
-    const first = await review({ vcs: vcs(head, twoFiles), runtime: reporting, verify: false });
+    const first = await review({
+      vcs: vcs(head, twoFiles),
+      runtime: reporting,
+      stages: { verify: false },
+    });
     const fingerprint = first.findings[0]?.fingerprint ?? "";
     const judgePrompts: string[] = [];
     const judging = Object.assign(reporting, {
@@ -219,7 +267,12 @@ describe("review against the previous review", () => {
       findings: asPrior(first),
       replies: { [fingerprint]: ["Handled by the caller in api.ts."] },
     });
-    await review({ vcs: adapter, runtime: judging, verify: false, fullReview: true });
+    await review({
+      vcs: adapter,
+      runtime: judging,
+      stages: { verify: false },
+      mode: { full: true },
+    });
     expect(judgePrompts).toHaveLength(1);
     expect(judgePrompts[0]).toContain(
       "<ocra_reply>\nHandled by the caller in api.ts.\n</ocra_reply>",
