@@ -82,7 +82,13 @@ export async function runJob(
     },
     options.signal,
     {
-      onProgress: (message) => emit({ type: "task_progress", taskId: job.taskId, message }),
+      onProgress: (message, attempt) =>
+        emit({
+          type: "task_progress",
+          taskId: job.taskId,
+          message,
+          ...(attempt ? { attempt } : {}),
+        }),
       onUsage: options.onUsage,
       category: job.reviewer.category,
       abortGraceMs: options.abortGraceMs,
@@ -102,6 +108,7 @@ export async function runJob(
     usage,
   };
   if (result.error !== undefined) outcome.error = result.error;
+  if (result.ended !== undefined) outcome.ended = result.ended;
   emit({ type: "task_finished", outcome });
   return { outcome, findings: anchored.findings, usage, warnings };
 }

@@ -1,4 +1,5 @@
-import type { Usage } from "../contracts.js";
+import { z } from "zod";
+import type { AttemptRecord, IncompleteEnding, Usage } from "../contracts.js";
 import { REVIEW_TOOLS } from "../review/tools.js";
 import type { QuotaError } from "./quota.js";
 
@@ -32,6 +33,14 @@ export interface AttemptOutcome {
   text: string;
   // The agent stopped early and was told once to finish.
   resumed?: true;
+  // Its last turn used every step it was allowed without the done tool. Only
+  // the runtime knows: OpenCode caps each turn, so a resumed session's steps
+  // add up past the cap without either turn reaching it.
+  atStepCap?: true;
+  // Distinct paths it passed to read_file and the literals it passed to
+  // code_search, in order (exploredBy).
+  read?: string[];
+  searched?: string[];
   usage: Usage;
   error?: AttemptError;
 }
@@ -58,4 +67,73 @@ export function toolSummary(toolCalls: readonly string[]): string {
   const byUse = [...counts].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
   const finished = names.includes(REVIEW_TOOLS.taskDone) ? "" : "; no task_done";
   return `${toolCalls.length} tool call(s) (${byUse.map(([n, c]) => `${n} ${c}`).join(", ")}${finished})`;
+}
+
+// How an attempt ended. Read before any later turn of the attempt (the
+// wrap-up turn of #470) can call the done tool, so that turn cannot make a
+// cut-off review count as finished.
+export type AttemptEnding = "done" | IncompleteEnding | "error";
+
+export function attemptEnding(outcome: AttemptOutcome): AttemptEnding {
+  if (outcome.error) return "error";
+  if (outcome.toolCalls.includes(REVIEW_TOOLS.taskDone)) return "done";
+  return outcome.atStepCap ? "step_cap" : "stopped_early";
+}
+
+export interface ToolUse {
+  // As the review tools name it, without a runtime's prefix.
+  name: string;
+  input: unknown;
+}
+
+// A model chooses these strings, so the session log keeps a bounded number
+// of bounded ones.
+const MAX_EXPLORED = 200;
+const MAX_EXPLORED_CHARS = 500;
+const MAX_TEXT_CHARS = 4_000;
+
+// The files an attempt read and what it searched for, from its tool calls.
+export function exploredBy(uses: readonly ToolUse[]): { read: string[]; searched: string[] } {
+  return {
+    read: distinct(uses, REVIEW_TOOLS.readFile, (input) => readInput.safeParse(input).data?.path),
+    searched: distinct(
+      uses,
+      REVIEW_TOOLS.codeSearch,
+      (input) => searchInput.safeParse(input).data?.literal,
+    ),
+  };
+}
+
+const readInput = z.object({ path: z.string() });
+const searchInput = z.object({ literal: z.string() });
+
+function distinct(
+  uses: readonly ToolUse[],
+  tool: string,
+  pick: (input: unknown) => string | undefined,
+): string[] {
+  const values = new Set<string>();
+  for (const use of uses) {
+    const value = use.name === tool ? pick(use.input) : undefined;
+    if (value !== undefined) values.add(cut(value, MAX_EXPLORED_CHARS));
+    if (values.size >= MAX_EXPLORED) break;
+  }
+  return [...values];
+}
+
+export function attemptRecord(model: string, outcome: AttemptOutcome): AttemptRecord {
+  return {
+    model,
+    read: outcome.read ?? [],
+    searched: outcome.searched ?? [],
+    // The end of an answer is where a reviewer concludes.
+    text:
+      outcome.text.length > MAX_TEXT_CHARS
+        ? `…${outcome.text.slice(-MAX_TEXT_CHARS)}`
+        : outcome.text,
+  };
+}
+
+function cut(text: string, max: number): string {
+  return text.length > max ? `${text.slice(0, max)}…` : text;
 }

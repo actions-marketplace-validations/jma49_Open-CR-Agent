@@ -1,7 +1,13 @@
 import { addUsage, emptyUsage } from "../agent/usage.js";
 import type { AgentEvent, CompletionResult, ModelTier, Usage } from "../contracts.js";
 import { CompletionError } from "../errors.js";
-import { type AttemptOutcome, attemptSummary } from "./attempt.js";
+import {
+  type AttemptEnding,
+  type AttemptOutcome,
+  attemptEnding,
+  attemptRecord,
+  attemptSummary,
+} from "./attempt.js";
 import type { ModelHealth } from "./models.js";
 import { sleep } from "./quota.js";
 
@@ -48,15 +54,21 @@ export async function* withFailback(options: FailbackOptions): AsyncGenerator<Ag
         yield { type: "usage", taskId, ...live.take() };
       }
       const outcome = await running;
+      const ended = attemptEnding(outcome);
       yield { type: "usage", taskId, ...live.rest(outcome.usage) };
-      yield { type: "progress", taskId, message: attemptSummary(model, outcome) };
+      yield {
+        type: "progress",
+        taskId,
+        message: attemptSummary(model, outcome),
+        attempt: attemptRecord(model, outcome),
+      };
       for (const finding of outcome.findings) yield { type: "finding", taskId, finding, model };
 
       // A cancelled attempt is neither finished nor the model's fault.
       if (signal.aborted) return;
       if (!outcome.error) {
         health.recordSuccess(model);
-        yield { type: "done", taskId };
+        yield doneEvent(taskId, ended);
         return;
       }
       if (!outcome.error.retryable) {
@@ -85,6 +97,12 @@ export async function* withFailback(options: FailbackOptions): AsyncGenerator<Ag
       : `every ${chainName(options)} is out of quota for this run`,
     retryable: true,
   };
+}
+
+function doneEvent(taskId: string, ended: AttemptEnding): AgentEvent {
+  return ended === "step_cap" || ended === "stopped_early"
+    ? { type: "done", taskId, ended }
+    : { type: "done", taskId };
 }
 
 // Hands out what an attempt has spent in increments, each what grew since the

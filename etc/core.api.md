@@ -19,6 +19,7 @@ export type AgentEvent = {
     type: "progress";
     taskId: string;
     message: string;
+    attempt?: AttemptRecord;
 } | {
     type: "finding";
     taskId: string;
@@ -30,6 +31,7 @@ export type AgentEvent = {
 } & Usage) | {
     type: "done";
     taskId: string;
+    ended?: IncompleteEnding;
 } | {
     type: "error";
     taskId: string;
@@ -146,11 +148,17 @@ export interface AttemptError {
 // @public (undocumented)
 export interface AttemptOutcome {
     // (undocumented)
+    atStepCap?: true;
+    // (undocumented)
     error?: AttemptError;
     // (undocumented)
     findings: unknown[];
     // (undocumented)
+    read?: string[];
+    // (undocumented)
     resumed?: true;
+    // (undocumented)
+    searched?: string[];
     // (undocumented)
     steps: number;
     // (undocumented)
@@ -159,6 +167,18 @@ export interface AttemptOutcome {
     toolCalls: string[];
     // (undocumented)
     usage: Usage;
+}
+
+// @public (undocumented)
+export interface AttemptRecord {
+    // (undocumented)
+    model: string;
+    // (undocumented)
+    read: string[];
+    // (undocumented)
+    searched: string[];
+    // (undocumented)
+    text: string;
 }
 
 // @public (undocumented)
@@ -269,6 +289,10 @@ export type CoverageEntry = {
     status: "reviewed" | "failed" | "unreviewed" | "unchanged";
 } | {
     path: string;
+    status: "incomplete";
+    ended: IncompleteEnding;
+} | {
+    path: string;
     status: "excluded";
     reason: ExclusionReason;
 };
@@ -280,6 +304,7 @@ export function coverageGaps(run: {
 }): {
     notReviewed: number;
     nothingReviewed: boolean;
+    incomplete: Record<IncompleteEnding, number>;
 };
 
 // @public (undocumented)
@@ -360,6 +385,12 @@ const exclusionReasonSchema: z.ZodEnum<{
     too_large: "too_large";
     user_exclude: "user_exclude";
 }>;
+
+// @public (undocumented)
+export function exploredBy(uses: readonly ToolUse[]): {
+    read: string[];
+    searched: string[];
+};
 
 // @public (undocumented)
 export type FileChangeKind = "added" | "modified" | "deleted" | "renamed";
@@ -460,7 +491,16 @@ export interface Hunk {
 }
 
 // @public (undocumented)
+const INCOMPLETE_ENDINGS: readonly ["step_cap", "stopped_early"];
+
+// @public (undocumented)
+export type IncompleteEnding = (typeof INCOMPLETE_ENDINGS)[number];
+
+// @public (undocumented)
 export function isOcraError(error: unknown, code?: OcraErrorCode): error is OcraError;
+
+// @public (undocumented)
+export function isUnfinished(entry: CoverageEntry): boolean;
 
 // @public (undocumented)
 export interface JudgeDecisions {
@@ -850,6 +890,13 @@ export const reportOutputSchema: z.ZodObject<{
         }>;
     }, z.core.$strict>, z.ZodObject<{
         path: z.ZodString;
+        status: z.ZodLiteral<"incomplete">;
+        ended: z.ZodEnum<{
+            step_cap: "step_cap";
+            stopped_early: "stopped_early";
+        }>;
+    }, z.core.$strict>, z.ZodObject<{
+        path: z.ZodString;
         status: z.ZodLiteral<"excluded">;
         reason: z.ZodEnum<{
             binary: "binary";
@@ -1039,6 +1086,10 @@ export const reportOutputSchema: z.ZodObject<{
             timed_out: "timed_out";
         }>;
         error: z.ZodExactOptional<z.ZodString>;
+        ended: z.ZodExactOptional<z.ZodEnum<{
+            step_cap: "step_cap";
+            stopped_early: "stopped_early";
+        }>>;
         findings: z.ZodInt;
         durationMs: z.ZodNumber;
         usage: z.ZodObject<{
@@ -1242,6 +1293,7 @@ export type ReviewEvent = {
     type: "task_progress";
     taskId: string;
     message: string;
+    attempt?: AttemptRecord;
 } | {
     type: "finding";
     taskId: string;
@@ -1640,6 +1692,8 @@ export interface TaskOutcome {
     // (undocumented)
     durationMs: number;
     // (undocumented)
+    ended?: IncompleteEnding;
+    // (undocumented)
     error?: string;
     // (undocumented)
     files: string[];
@@ -1682,6 +1736,14 @@ export interface ToolDefinition<Shape extends z.ZodRawShape = z.ZodRawShape> {
     execute(args: z.infer<z.ZodObject<Shape>>, context: ReviewContext): Promise<string>;
     // (undocumented)
     inputSchema: z.ZodObject<Shape>;
+    // (undocumented)
+    name: string;
+}
+
+// @public (undocumented)
+export interface ToolUse {
+    // (undocumented)
+    input: unknown;
     // (undocumented)
     name: string;
 }

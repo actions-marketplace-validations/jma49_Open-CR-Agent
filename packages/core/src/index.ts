@@ -20,10 +20,12 @@ export type {
   AgentTaskSpec,
   AppliedSampling,
   AppliedSettings,
+  AttemptRecord,
   CodeMatch,
   CompletionRequest,
   CompletionResult,
   Effort,
+  IncompleteEnding,
   ModelChains,
   ModelTier,
   ReviewContext,
@@ -110,6 +112,7 @@ export {
   type AnchoringSummary,
   type CoverageEntry,
   coverageGaps,
+  isUnfinished,
   type ReviewEvent,
   type ReviewReport,
   type TaskOutcome,
@@ -123,8 +126,10 @@ export type { RuleSet } from "./rules/rule-set.js";
 export {
   type AttemptError,
   type AttemptOutcome,
+  exploredBy,
   MAX_AGENT_STEPS,
   RESUME_MESSAGE,
+  type ToolUse,
   withoutSecrets,
 } from "./runtime/attempt.js";
 export { ChainRunner, type ModelAttempts } from "./runtime/chain-runner.js";

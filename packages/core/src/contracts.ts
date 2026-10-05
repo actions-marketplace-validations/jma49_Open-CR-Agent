@@ -38,12 +38,32 @@ export interface ReviewContext {
   searchCode(literal: string): Promise<CodeMatch[]>;
 }
 
+// How a review task that finished without the done tool ended: its agent
+// used every step (step_cap), or stopped with steps left (stopped_early; one
+// that stopped silently was first told once to continue).
+export const INCOMPLETE_ENDINGS = ["step_cap", "stopped_early"] as const;
+export type IncompleteEnding = (typeof INCOMPLETE_ENDINGS)[number];
+
+// What one attempt of a review task looked at and answered: the files it
+// read, the literals it searched for and its final text. Kept in the session
+// log, never in the report, so an analysis can tell a file the reviewer never
+// read from one it read and reported nothing on.
+export interface AttemptRecord {
+  model: string;
+  read: string[];
+  searched: string[];
+  text: string;
+}
+
 export type AgentEvent =
-  | { type: "progress"; taskId: string; message: string }
+  // attempt: on the line that sums up a finished attempt.
+  | { type: "progress"; taskId: string; message: string; attempt?: AttemptRecord }
   // model: the one that reported the finding, when the runtime knows it.
   | { type: "finding"; taskId: string; finding: unknown; model?: string }
   | ({ type: "usage"; taskId: string } & Usage)
-  | { type: "done"; taskId: string }
+  // ended: absent when the agent called the done tool; otherwise how it
+  // stopped without it, so its files count as only partly reviewed.
+  | { type: "done"; taskId: string; ended?: IncompleteEnding }
   | { type: "error"; taskId: string; error: string; retryable: boolean };
 
 export interface Usage {

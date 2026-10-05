@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { Usage } from "../contracts.js";
+import type { AttemptRecord, IncompleteEnding, Usage } from "../contracts.js";
 import type {
   AnchorMethod,
   ChangeRequest,
@@ -16,10 +16,21 @@ import type { RefutedFinding } from "../verify/verify.js";
 import type { RunProvenance } from "./provenance.js";
 
 // "unchanged": reviewed by an earlier run and not changed since, so not
-// reviewed again; its earlier findings carry over.
+// reviewed again; its earlier findings carry over. "incomplete": a reviewer's
+// task finished without its agent calling the done tool, so the file was at
+// most partly reviewed; `ended` says how.
 export type CoverageEntry =
   | { path: string; status: "reviewed" | "failed" | "unreviewed" | "unchanged" }
+  | { path: string; status: "incomplete"; ended: IncompleteEnding }
   | { path: string; status: "excluded"; reason: ExclusionReason };
+
+// A selected file this run did not finish: the run is incomplete, and the
+// next review of a pull or merge request includes it.
+export function isUnfinished(entry: CoverageEntry): boolean {
+  return (
+    entry.status === "failed" || entry.status === "unreviewed" || entry.status === "incomplete"
+  );
+}
 
 // How much of the selection this run actually reviewed. Every surface (exit
 // code, terminal, pull request summary) reads it from here, so none of them
@@ -28,12 +39,14 @@ export function coverageGaps(run: {
   coverage: readonly CoverageEntry[];
   tasks: readonly Pick<TaskOutcome, "status">[];
 }): {
+  // Every unfinished file, those only partly reviewed included.
   notReviewed: number;
   nothingReviewed: boolean;
+  incomplete: Record<IncompleteEnding, number>;
 } {
-  const notReviewed = run.coverage.filter(
-    (c) => c.status === "failed" || c.status === "unreviewed",
-  ).length;
+  const notReviewed = run.coverage.filter(isUnfinished).length;
+  const incomplete = { step_cap: 0, stopped_early: 0 };
+  for (const c of run.coverage) if (c.status === "incomplete") incomplete[c.ended] += 1;
   // Unchanged files were reviewed by an earlier run, and their findings and
   // verdict carry over: a re-review whose new files all failed still has them.
   // A file stays failed while any of its reviewers failed, so a reviewer that
@@ -41,7 +54,7 @@ export function coverageGaps(run: {
   const reviewed =
     run.coverage.some((c) => c.status === "reviewed" || c.status === "unchanged") ||
     run.tasks.some((t) => t.status === "completed");
-  return { notReviewed, nothingReviewed: notReviewed > 0 && !reviewed };
+  return { notReviewed, nothingReviewed: notReviewed > 0 && !reviewed, incomplete };
 }
 
 export const taskStatusSchema = z.enum(["completed", "failed", "timed_out", "cancelled"]);
@@ -54,6 +67,9 @@ export interface TaskOutcome {
   files: string[];
   status: TaskStatus;
   error?: string;
+  // The task finished without its agent calling the done tool: its files
+  // count as only partly reviewed.
+  ended?: IncompleteEnding;
   findings: number;
   durationMs: number;
   // What the task spent, its share of a plan call included; a finding's
@@ -109,7 +125,8 @@ export type ReviewEvent =
   | { type: "files_bundled"; strategy: string; bundles: number; warnings: string[] }
   | { type: "matrix_planned"; tasks: number; skipped: SkippedCell[] }
   | { type: "task_started"; taskId: string; reviewer: string; bundle: string; files: string[] }
-  | { type: "task_progress"; taskId: string; message: string }
+  // attempt: what a finished attempt read, searched for and answered.
+  | { type: "task_progress"; taskId: string; message: string; attempt?: AttemptRecord }
   | { type: "finding"; taskId: string; finding: Finding }
   // A reported finding the run did not keep: on a file outside the task's
   // bundle. File and title only, so a later analysis can tell what was lost.
