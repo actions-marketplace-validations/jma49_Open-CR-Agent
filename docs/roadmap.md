@@ -97,7 +97,7 @@ The milestones below keep their lists; the order of work is the one above.
 2. **A run id** through logs, comments, the report and the session file; the event schema versioned and published. The run id landed (the session id, in the report as `runId`, in the progress output, the summary comment and the SARIF log); the event schema is still internal.
 3. Minimal metrics an operations team can scrape from session files: runs, cost, findings, dismissals, acceptance rate, per reviewer. Landed as `ocra metrics` (text and versioned JSON over the sessions' `report.json`).
 
-**M13 — Use** (people, not code; the focus from 2026-10-05). Three external teams on the Action or the GitLab job, reviewing their real pull requests, with their dismissals and replies feeding the golden set; the three-maintainer conversations from M8. If no team will run it, the next phase starts with the product layer, not the control plane.
+**M13 — Use** (people, not code; the focus from 2026-10-05). Three external teams on the Action or the GitLab job, reviewing their real pull requests, with their dismissals and replies feeding the golden set; the three-maintainer conversations from M8. If no team will run it, the next phase starts with the product layer, not the control plane. Landed: `ocra init`, a one-command setup that writes the configuration for the key in the environment and, with `--github`, the fork-safe workflow.
 
 **M14 — ocra Cloud** ([ADR-0024](adr/0024-ocra-cloud.md); frozen from 2026-10-05: running, security fixes only, decided again at the six-week checkpoint). Open core plus an optional hosted service on the published packages, in its own private repository.
 
@@ -142,7 +142,7 @@ What a company checks before adopting a code review tool, and where ocra is. Upd
 | Policy | Repository and remote configuration; no organization-level policy the repository cannot override (M12) |
 | Integrations | Versioned JSON report with a published JSON Schema; SARIF 2.1.0 out; SARIF in (`--import-sarif`); no sinks contract yet (M10) |
 | Observability | Session files with cost, tokens and latency per run, and one run id across the session directory, the report, the progress output, the summary comment and the SARIF log; `ocra metrics` over the session reports; no published event schema (M12) |
-| Quality evidence | 16 golden cases, one run, agent labels spot-checked by a second model; a nightly live smoke workflow on a free model, waiting for its secret; golden runs paused with the credit (M11) |
+| Quality evidence | 16 golden cases, one run on Gemini and two smoke-tier runs on a free model (not comparable with each other's judge), agent labels spot-checked by a second model; the nightly live smoke and the daily free golden evaluation (`eval-free.yml`) run on the free quota (M11) |
 | Support and stability | Early 0.x; the Stability and support page names the contracts; one maintainer |
 | Production use | Dogfood on two repositories; no external user yet (M13) |
 

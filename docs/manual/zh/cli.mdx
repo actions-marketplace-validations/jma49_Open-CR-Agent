@@ -3,6 +3,68 @@ title: CLI 参考
 description: 命令、参数、输出与退出码。
 ---
 
+## ocra init
+
+为当前所在的仓库配置好 ocra：写入 `.ocra/config.json`，加 `--github` 时再写入 workflow `.github/workflows/ocra.yml`，然后打印剩下要做的事。它不调用任何模型或网络服务，也不会替你运行 `gh` 或 `git`。
+
+```bash
+ocra init                          # 按环境里的 key 写 .ocra/config.json
+ocra init --github                 # 同时写 GitHub workflow，可安全审查来自 fork 的 PR
+ocra init --github --same-repo-only
+ocra init --provider anthropic     # 当前 shell 里没有这个供应商的 key 时指定它
+```
+
+| 参数 | 含义 |
+|---|---|
+| `--github` | 同时写入 `.github/workflows/ocra.yml`：即 `pull_request_target` 上的[fork 方案](./github#来自-fork-的-pr)。成员和协作者的 PR 每次推送都审查，其他人的 PR 在维护者每次加上 `ocra-review` 标签时审查一次；只检出 base 分支，不运行 PR 里的任何东西 |
+| `--same-repo-only` | 与 `--github` 一起用，改写普通的 [`pull_request` workflow](./github#github-action)。来自 fork 的 PR 在那里拿不到 secret，不会被审查；对接受外部贡献的项目来说，这往往是大部分 PR |
+| `--provider <name>` | `gemini`、`anthropic`、`openai` 或 `openrouter`，代替从环境里找到的 key |
+| `--force` | 文件已存在时替换它。不加时保留已有文件，并说明保留了 |
+
+**模型。** 不加 `--provider` 时，ocra init 依次查找 `GEMINI_API_KEY`、`ANTHROPIC_API_KEY`、`OPENAI_API_KEY`、`OPENROUTER_API_KEY`，用第一个已设置的，并列出找到的其他 key。只有在没有其他 key 时才会选 OpenRouter 的免费模型。它为每一档写一个模型：
+
+| 供应商 | `top` | `standard` | `light` | 运行时 |
+|---|---|---|---|---|
+| `gemini` | `google/gemini-3.1-pro-preview` | `google/gemini-3.5-flash` | `google/gemini-flash-lite-latest` | `opencode` |
+| `anthropic` | `anthropic/claude-opus-5-5` | `anthropic/claude-sonnet-5-5` | `anthropic/claude-haiku-4-5` | `opencode` |
+| `openai` | `openai/gpt-6-sol` | `openai/gpt-6-sol` | `openai/gpt-6-luna` | `opencode` |
+| `openrouter` | `router/stealth/space-bunny-alpha`，免费（[预览模型](./providers#openrouter-上的免费模型)） | 同左 | 同左 | `direct` |
+
+**运行时。** 只有已经用 `direct` 运行时真实审查过的供应商才会配置成 `direct`，目前只有 OpenRouter 的免费模型：这时配置设置 `"runtime": "direct"`，以价格 0 声明端点，workflow 传 `opencode: false`，ocra 安装约 11 MB 而不是 175 MB。Gemini、Anthropic 和 OpenAI 仍用默认运行时 `opencode`：配置里写的是 OpenCode 目录中的模型，价格由 OpenCode 自己计算，workflow 照 Action 的默认安装 OpenCode。ocra init 会用一行话说明这一点，并链接到[选择运行时](./providers#选择运行时)，那里介绍了怎样把这类供应商换到 `direct`。不是 ocra init 写的配置不受影响；`--github` 保留了一个没有设置 `direct` 的已有配置时，workflow 会安装 OpenCode。
+
+以 Gemini 为例，写出的文件是：
+
+```json
+{
+  "$schema": "https://raw.githubusercontent.com/jma49/Open-CR-Agent/main/docs/schema/config.v1.json",
+  "models": {
+    "top": "google/gemini-3.1-pro-preview",
+    "standard": "google/gemini-3.5-flash",
+    "light": "google/gemini-flash-lite-latest"
+  }
+}
+```
+
+key 本身从不写入文件：OpenCode 从 `GEMINI_API_KEY` 读取它，声明的端点只写保存它的环境变量名。模型可以像其他[配置](./configuration)一样修改。
+
+**workflow** 就是手册里的方案，加上作为 secret 的供应商 key 和每次审查的 `--max-cost-usd 2`，在 direct 运行时下再加 `opencode: false`。它把 Action 固定到这个版本的 ocra 所记录的发布提交上，并以注释写明版本，和 [GitHub](./github) 页面里的示例一样。`ocra init --github` 会打印剩下的步骤：
+
+```text
+Wrote .ocra/config.json: Gemini models through GEMINI_API_KEY, on the OpenCode runtime.
+  OpenCode makes the install about 175 MB; to switch to the 11 MB direct runtime later, see https://github.com/jma49/Open-CR-Agent/blob/main/docs/manual/en/providers.mdx#choosing-the-runtime
+Wrote .github/workflows/ocra.yml: pull requests from members are reviewed on every push, anyone else's once each time a maintainer adds the ocra-review label.
+
+Next:
+  1. Store the key as a repository secret (gh asks for its value):
+       gh secret set GEMINI_API_KEY
+  2. Create the label that starts a review of an outside pull request:
+       gh label create ocra-review --description "Review this pull request with ocra"
+  3. Commit .ocra/config.json and .github/workflows/ocra.yml, and merge them into the default branch:
+       ocra reads its configuration from a pull request's base branch.
+```
+
+私有仓库请按 workflow 里的注释删掉 `persist-credentials: false`。在仓库内任何目录运行，ocra init 都写到仓库根目录；它拒绝经由符号链接写入；没找到 key 又没给 `--provider`，或不在 Git 仓库里时，它以退出码 `2` 结束，什么也不写。
+
 ## ocra review
 
 审查当前 Git 仓库里的代码改动。

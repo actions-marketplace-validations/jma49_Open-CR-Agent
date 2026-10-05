@@ -37,6 +37,19 @@ The full design: [architecture](docs/architecture.md) and the [decision records]
 
 Requires Node.js 22.19 or newer and Git.
 
+**Five-minute setup.** With a model key in your shell, `ocra init` writes the configuration:
+
+```bash
+npm install -g @open-cr-agent/cli
+export GEMINI_API_KEY="your-key"     # or ANTHROPIC_API_KEY, OPENAI_API_KEY, OPENROUTER_API_KEY
+cd your-repository
+ocra init                            # .ocra/config.json with models for that key
+ocra review                          # review your uncommitted changes
+ocra init --github                   # also .github/workflows/ocra.yml, safe for pull requests from forks
+```
+
+`ocra init` never replaces a file that exists (`--force` does), and prints the next steps, such as the `gh secret set` and `gh label create ocra-review` commands for the workflow ([ocra init](docs/manual/en/cli.mdx#ocra-init)). Or set it up by hand:
+
 ```bash
 npm install -g @open-cr-agent/cli
 export GEMINI_API_KEY="your-key"       # any provider OpenCode supports; see Model providers
@@ -183,7 +196,7 @@ Assume the reviewed code is hostile; ocra does.
 
 ## Quality and evaluation
 
-Numbers are published with their limits, and only numbers that were measured. Today: one run on 16 golden cases, with recall the weak point, on one model family; a second model spot-checked the labels. Two identical runs on ten benchmark pull requests differ by 20 points of precision, so the sample cannot yet decide prompt changes, and prompts stay frozen until it can. [Measured quality](docs/manual/en/quality.mdx).
+Numbers are published with their limits, and only numbers that were measured. Today: one run on 16 golden cases on Gemini and two runs of the 10-case smoke tier on a free OpenRouter model, with recall the weak point in all of them; a second model spot-checked the labels. Two identical runs on ten benchmark pull requests differ by 20 points of precision, so the sample cannot yet decide prompt changes, and prompts stay frozen until it can. [Measured quality](docs/manual/en/quality.mdx).
 
 `ocra-eval` replays [AACR-Bench](https://github.com/alibaba/aacr-bench) (200 real pull requests, 1,505 expert-verified comments) and ocra's own golden set, and reports precision, recall, F1, cost and latency. Reviews run at a fixed temperature and seed, every report records the ocra version, prompt and configuration hashes and the sampling applied, and `--repeat k` gives each metric a 95% confidence interval, so `compare` calls a change better only when the intervals separate. The free `ceiling` command shows what the deterministic stages can reach at all. [Evaluation guide](docs/manual/en/evaluation.mdx).
 
@@ -198,7 +211,7 @@ ocra's long-term position is the engine other review agents are built on, not an
 | M5–M6 | A quality number that can decide changes; recall without losing precision | paused until model credit |
 | M10 | Contracts: a Finding specification, a public `review()` entry, a second runtime with a conformance suite, SARIF in | mostly built; the rest paused |
 | M14 | ocra Cloud ([ADR-0024](docs/adr/0024-ocra-cloud.md)): login, your own key behind a model gateway, a web view of reviews, account configuration and opt-in findings | Phase 1 built (0.5.0); frozen while users and recall come first |
-| M11–M13 | Evidence (a nightly live test, per-reviewer numbers), operability (organization policy, run ids, metrics), external use | now: external use and recall (M11, M13); operability paused |
+| M11–M13 | Evidence (a nightly live test, per-reviewer numbers), operability (organization policy, run ids, metrics), external use | now: external use and recall (M11, M13), with `ocra init` for a one-command setup; operability paused |
 
 The plan, the reasoning and what is deliberately not built: [roadmap](docs/roadmap.md).
 
