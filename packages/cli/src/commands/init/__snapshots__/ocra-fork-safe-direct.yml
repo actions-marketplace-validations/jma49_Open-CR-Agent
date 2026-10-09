@@ -9,10 +9,6 @@ permissions:
   contents: read
   pull-requests: write
 
-concurrency:
-  group: ocra-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
-
 jobs:
   review:
     # Members and collaborators: every push. Anyone else: one review each
@@ -21,16 +17,27 @@ jobs:
       (github.event.action == 'labeled' && github.event.label.name == 'ocra-review') ||
       (github.event.action != 'labeled' &&
         contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.pull_request.author_association))
+    # One review per pull request at a time: a new push cancels the older run.
+    # The key repeats the if:, so a run the if: skips gets a group of its
+    # own and cannot cancel the review in progress.
+    concurrency:
+      group: >-
+        ocra-${{ github.event.pull_request.number }}-${{
+          ((github.event.action == 'labeled' && github.event.label.name == 'ocra-review') ||
+           (github.event.action != 'labeled' &&
+             contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.pull_request.author_association)))
+          && 'review' || github.run_id }}
+      cancel-in-progress: true
     runs-on: ubuntu-latest
     steps:
       # The base branch. Nothing from the pull request is checked out.
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           # In a private repository, remove this line: ocra fetches the
           # pull request's commits with the checkout's credentials.
           persist-credentials: false
-      - uses: jma49/Open-CR-Agent@82a3f1183a3177e9efa401d87eb95dea495ef619 # v0.6.0
+      - uses: jma49/Open-CR-Agent@6d4d4a21b6334c086e0f884c240d550b2e4c1f46 # v0.7.0
         with:
           opencode: false
           args: --max-cost-usd 2

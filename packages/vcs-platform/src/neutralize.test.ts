@@ -126,9 +126,11 @@ describe("safeMarkdown treats what is not a code span as text", () => {
     );
   });
 
-  it("a ~~~ fence and an indented block", () => {
+  it("a ~~~ fence, and an indented block after a line that is not blank", () => {
     expect(safeMarkdown("~~~\n@all\n~~~", { startsLine: true })).toBe("~~~\n@\u200ball\n~~~");
-    expect(safeMarkdown("    @all", { startsLine: true })).toBe("    @\u200ball");
+    expect(safeMarkdown("> ```\n    @all", { startsLine: true })).toBe(
+      "> \\`\\`\\`\n    @\u200ball",
+    );
   });
 
   it("so that pieces of one line cannot pair backticks across each other", () => {
@@ -137,5 +139,101 @@ describe("safeMarkdown treats what is not a code span as text", () => {
     // The title's backtick is escaped, so the body's span is still the only one,
     // and what is outside it was neutralized.
     expect(line).toBe("**x \\`**: `@all` z");
+  });
+});
+
+describe("safeMarkdown leaves text nothing that binds tighter than a code span", () => {
+  it("shows every angle bracket as text, also an incomplete tag", () => {
+    expect(safeMarkdown("a < b, <i, \\<b> and `<i>`")).toBe("a &lt; b, &lt;i, \\<b> and `<i>`");
+  });
+
+  it("escapes dollar signs, between which both platforms render math", () => {
+    expect(safeMarkdown("costs $5, `$HOME` and \\$x")).toBe("costs \\$5, `$HOME` and \\$x");
+  });
+
+  it("escapes a backtick after an escaped backslash, which is not escaped itself", () => {
+    expect(safeMarkdown("\\\\` @all")).toBe("\\\\\\` @\u200ball");
+  });
+
+  it("spaces out a GitLab multiline blockquote fence, which CommonMark reads the same", () => {
+    expect(safeMarkdown(">>>\n- >>>> \na >>>", { startsLine: true })).toBe(
+      "> > >\n- > > > > \na > > >",
+    );
+    expect(safeMarkdown(">>> quoted")).toBe(">>> quoted");
+  });
+
+  it("ends lines at carriage returns, as CommonMark does", () => {
+    expect(safeMarkdown("a\r\n/merge\r/close")).toBe("a\n\u200b/merge\n\u200b/close");
+  });
+
+  it("breaks an address whose slashes are escaped, which GitLab links once rendered", () => {
+    expect(safeMarkdown("smb:\\/\\/host and www\\.host")).toBe(
+      "smb:\u200b\\/\\/host and www\u200b\\.host",
+    );
+  });
+});
+
+describe("safeMarkdown keeps model text from posting what ocra posts only under its own rules", () => {
+  it("breaks a GitLab wikilink, which links any target", () => {
+    expect(safeMarkdown("[[a|//host/x]] and [[[b]]")).toBe("[​[a|//host/x]] and [​[​[b]]");
+  });
+
+  it.each([
+    ["a backtick fence", "```suggestion\nx\n```", "```​suggestion\nx\n```"],
+    ["a tilde fence", "~~~suggestion:-0+0\nx\n~~~", "~~~​suggestion:-0+0\nx\n~~~"],
+    ["an unclosed fence", "~~~Suggestion\nx", "~~~​Suggestion\nx"],
+    ["a decoded info string", "```suggesti&#111;n\nx\n```", "```​suggesti&#111;n\nx\n```"],
+  ])(
+    "breaks the info string of a suggestion in %s, which only ADR-0029's checks may post",
+    (_, text, safe) => {
+      expect(safeMarkdown(text, { startsLine: true })).toBe(safe);
+    },
+  );
+
+  it("breaks a suggestion fence past the first line of text placed after other words", () => {
+    expect(safeMarkdown("Instead:\n~~~suggestion\nx\n~~~")).toBe("Instead:\n~~~​suggestion\nx\n~~~");
+  });
+});
+
+describe("safeMarkdown bounds its work", () => {
+  it("cuts text at GitHub's comment limit, and at 2,000 lines", () => {
+    expect(safeMarkdown("a".repeat(70_000))).toBe(`${"a".repeat(65_536)} …(truncated)`);
+    expect(safeMarkdown("a\n".repeat(3_000))).toBe(`${"a\n".repeat(1_999)}a …(truncated)`);
+  });
+
+  it("nests at most 16 containers on a line, the rest of it being text", () => {
+    const deep = `${"- ".repeat(16)}\u200b- - x`;
+    expect(safeMarkdown(`${"- ".repeat(18)}x`, { startsLine: true })).toBe(deep);
+    expect(safeMarkdown(`${"> ".repeat(16)}x`, { startsLine: true })).toBe(`${"> ".repeat(16)}x`);
+  });
+
+  // The parser rescans the line or the paragraph at every level, line or
+  // heading of these: quadratic in the length the limit allows.
+  it.each([
+    ["emphasis delimiters", "*a".repeat(32_000)],
+    ["nested list items", `${"- ".repeat(32_768)}x`],
+    ["nested list items that could be a break", `${"* ".repeat(32_768)}x`],
+    ["nested ordered list items", `${"1. ".repeat(21_845)}x`],
+    ["nested quotes", `${"> ".repeat(32_768)}x`],
+    ["thematic breaks", "---\n".repeat(16_000)],
+    ["setext headings", "a\n---\n".repeat(10_000)],
+    ["lazy continuation lines", `> a\n${"b\n".repeat(20_000)}`],
+  ])("parses %s in linear time", (_, text) => {
+    const start = performance.now();
+    safeMarkdown(text, { startsLine: true });
+    expect(performance.now() - start).toBeLessThan(3_000);
+  });
+});
+
+describe("safeMarkdown leaves an indented code block as written", () => {
+  it("when it starts a line after a blank one, as code a reviewer quotes", () => {
+    const text = "Use:\n\n    p = make_unique<T>(); // @all\n\n    <!-- x -->\nDone @me";
+    expect(safeMarkdown(text, { startsLine: true })).toBe(
+      "Use:\n\n    p = make_unique<T>(); // @all\n\n    <!​-- x -->\nDone @​me",
+    );
+  });
+
+  it("but not after other words, where its context is not known", () => {
+    expect(safeMarkdown("x\n\n    a<b")).toBe("x\n\n    a&lt;b");
   });
 });

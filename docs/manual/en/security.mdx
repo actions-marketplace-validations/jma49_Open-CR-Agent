@@ -24,9 +24,9 @@ Nothing else is added: your global OpenCode configuration, installed skills and 
 - Review tools are served from ocra's own process on `127.0.0.1`, protected by a random bearer token.
 - The runtime receives only system basics and the credentials of the providers in your model chains, not your whole environment.
 - All built-in agent tools (shell, file editing, web access) are disabled; reviewers can only read the revision under review.
-- Model-requested paths are confined to the repository. Symbolic links are never followed: a link reads as its target path, as git stores it, so `notes.txt -> .env` cannot expose `.env`.
-- Reviewers cannot read, diff or search likely secret files (`.env`, keys, certificates, cloud and registry credentials, Terraform variables and state), a file renamed away from such a name, or anything under `.git/`, whatever a prompt asks. The same patterns keep those files out of review.
-- Session logs are never written through a symbolic link planted in the reviewed tree.
+- Model-requested paths are confined to the repository. Symbolic links are never followed: a link reads as its target path, as git stores it, so `notes.txt -> .env` cannot expose `.env`. A working-tree file reads only under its exact name: another spelling that a case-insensitive file system (macOS's default) would also open finds nothing.
+- Reviewers cannot read, diff or search likely secret files (`.env`, keys, certificates, cloud and registry credentials, Terraform variables and state), a file renamed away from such a name, or anything under `.git/`, under any spelling (case, Unicode case variants, invisible characters), whatever a prompt asks. The same patterns keep those files out of review.
+- Session logs and `--output` files are never written through a symbolic link planted in the reviewed tree.
 
 ## Untrusted input
 
@@ -35,6 +35,7 @@ Pull request text, diffs, repository files, rules, guidelines, tool results, SAR
 - ocra's own sections are tagged `<ocra_…>`. Text in the data that could form such a tag (look-alike brackets, spacing, case and invisible characters included) is rewritten to `‹ocra_…`, so data can neither leave its section nor pose as another finding. Ordinary HTML and XML in reviewed code pass unchanged.
 - Pull request titles and descriptions are capped in length; a reviewer reports at most 50 findings per task, with bounded text.
 - Terminal output (findings, commit messages, errors) has control characters, escape sequences and bidirectional overrides replaced, so a change cannot rewrite your screen, hide a finding or write to your clipboard. JSON output (`--format json`, session reports and logs) escapes the same characters.
+- `--resume` reuses only results ocra on this machine sealed with your own key, kept outside every repository, so a session committed with a change cannot pass itself off as an earlier review. It reads the session log without following links and only up to a size bound.
 
 ## The verdict is not a security gate
 

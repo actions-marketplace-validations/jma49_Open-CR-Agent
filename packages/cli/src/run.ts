@@ -1,4 +1,3 @@
-import { writeFile } from "node:fs/promises";
 import { parseArgs } from "node:util";
 import { errorMessage, isOcraError } from "@open-cr-agent/core";
 import { defaultCloudDeps } from "./cloud/deps.js";
@@ -17,6 +16,7 @@ import { forTerminal } from "./io/terminal.js";
 import { UsageError } from "./io/usage-error.js";
 import { defaultNpm } from "./plugins/npm.js";
 import { pluginsDir } from "./plugins/store.js";
+import { sessionKey } from "./session/key.js";
 import { VERSION } from "./version.js";
 
 const USAGE = `Usage: ocra <command> [options]
@@ -42,8 +42,8 @@ export function defaultDeps(): ReviewDeps {
     env: process.env,
     builtinPlugins: BUILTIN_PLUGINS,
     runtimes: BUILTIN_RUNTIMES,
-    writeFile: (path, content) => writeFile(path, content, "utf8"),
     cloud: defaultCloudDeps(process.env),
+    sessionKey: () => sessionKey(process.env),
     now: Date.now,
     heartbeatMs: 30_000,
     onInterrupt(handler) {

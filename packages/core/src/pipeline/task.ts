@@ -8,14 +8,9 @@ import type {
   IncompleteEnding,
   Usage,
 } from "../contracts.js";
-import { type ReportedFinding, reportedFindingSchema } from "../domain.js";
+import { type ReportedFinding, reportedFindingSchema, type TaskFinding } from "../domain.js";
 import { errorMessage } from "../errors.js";
 import type { TaskStatus } from "../report/report.js";
-
-export interface TaskFinding {
-  reported: ReportedFinding;
-  model?: string;
-}
 
 export interface TaskResult {
   status: TaskStatus;
@@ -77,8 +72,8 @@ export async function executeTask(
       const ending = iterator
         ? await collectAfterAbort(iterator, pending, result, callbacks)
         : undefined;
-      // The task's last usage report crossed the limit, and it finished
-      // anyway: its review is complete.
+      // The spend limit stopped the run, often through the task's own last
+      // usage report, after the task had finished: its review is complete.
       if (ending === "done" && runSignal.reason instanceof SpendLimitReached) {
         result.status = "completed";
         delete result.error;
@@ -163,7 +158,7 @@ function handle(event: AgentEvent, result: TaskResult, callbacks: TaskCallbacks)
 
 // A reviewer steered by the change could flood the pull request with
 // comments or pad them without end; both are bounded.
-const MAX_FINDINGS_PER_TASK = 50;
+export const MAX_FINDINGS_PER_TASK = 50;
 const MAX_TITLE = 300;
 const MAX_TEXT = 4_000;
 const MAX_EVIDENCE = 10;

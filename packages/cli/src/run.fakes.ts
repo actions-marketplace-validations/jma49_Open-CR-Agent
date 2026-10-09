@@ -1,4 +1,3 @@
-import { writeFileSync } from "node:fs";
 import type { AgentEvent, AgentTaskSpec, OcraPlugin } from "@open-cr-agent/core";
 import { scratchRepos } from "@open-cr-agent/test-support";
 import type { ReviewDeps } from "./commands/review/deps.js";
@@ -25,6 +24,9 @@ export function repoWithChange(): string {
 }
 
 export type Script = (spec: AgentTaskSpec) => AsyncIterable<AgentEvent>;
+
+// What the fake machine seals its sessions with.
+const TEST_SESSION_KEY = "ab".repeat(32);
 
 // With `verifier`, the fake runtime answers Verify by confirming every
 // finding and the judge with no changes.
@@ -64,9 +66,9 @@ export function deps(
   return {
     cwd,
     env: {},
+    sessionKey: async () => TEST_SESSION_KEY,
     builtinPlugins: BUILTIN_PLUGINS,
     runtimes: { opencode: async () => fakeRuntime },
-    writeFile: async (path, content) => writeFileSync(path, content),
     now: Date.now,
     heartbeatMs: 60_000,
     ...extra,

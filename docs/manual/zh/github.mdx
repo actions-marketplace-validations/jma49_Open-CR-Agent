@@ -15,24 +15,25 @@ permissions:
   contents: read
   pull-requests: write
 
-# One review per pull request at a time: a new push cancels the older run.
-concurrency:
-  group: ocra-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
-
 jobs:
   review:
+    # A pull request from a fork gets no secrets on pull_request: skip it.
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    # One review per pull request at a time: a new push cancels the older run.
+    concurrency:
+      group: ocra-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-      - uses: jma49/Open-CR-Agent@82a3f1183a3177e9efa401d87eb95dea495ef619 # v0.6.0
+      - uses: jma49/Open-CR-Agent@6d4d4a21b6334c086e0f884c240d550b2e4c1f46 # v0.7.0
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
 ```
 
-- **按提交固定版本**，在注释里写明版本号：tag 可以移动，提交不能。`git ls-remote --tags https://github.com/jma49/Open-CR-Agent v0.3.0` 会打印某个版本的提交；Dependabot 会更新固定的提交和注释。
+- **每个 action 都按提交固定版本**，在注释里写明版本号：tag 可以移动，提交不能。本页的方案和 `ocra init` 都这样做，`actions/checkout` 也不例外。`git ls-remote --tags https://github.com/jma49/Open-CR-Agent v0.3.0` 会打印某个版本的提交；Dependabot 会更新固定的提交和注释。
 - **保留 `fetch-depth: 0`：**ocra 需要 base 与 head 之间的历史，浅克隆会停下并给出提示。
 - **保留 `concurrency`：**否则连续两次 push 会把同样的评论发两遍，较慢的那次还可能用更旧的 head 覆盖摘要。被取消的运行不发布任何内容（已在发布时除外），把部分报告留在 job 日志里。
 - **把模型 key 存为仓库 secret。**模型来自 base 分支的 `.ocra/config.json` 或 `env` 里的 `OCRA_MODEL_*` 变量。
@@ -64,11 +65,11 @@ jobs:
 
 ```yaml
       - id: ocra
-        uses: jma49/Open-CR-Agent@82a3f1183a3177e9efa401d87eb95dea495ef619 # v0.6.0
+        uses: jma49/Open-CR-Agent@6d4d4a21b6334c086e0f884c240d550b2e4c1f46 # v0.7.0
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
       - if: ${{ !cancelled() && steps.ocra.outputs.report != '' }}
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ocra-report
           path: ${{ steps.ocra.outputs.report }}
@@ -84,14 +85,14 @@ jobs:
 
 结论只是参考意见（[原因](./security#结论不是安全门禁)）：不要用这项检查代替人工审查、把它设为必需的状态检查；打开 `fail-on-concerns` 时，通过只代表“没有被确认的问题”，不代表“安全”。
 
-在 `pull_request` 下，来自 fork 的 PR 拿不到 secret，审查会停下并提示缺少哪个 key；见[来自 fork 的 PR](#来自-fork-的-pr)。
+在 `pull_request` 下，来自 fork 的 PR 拿不到 secret，所以 `if:` 会跳过它们；要审查它们，见[来自 fork 的 PR](#来自-fork-的-pr)。
 
 ### 运行时
 
 默认运行时 OpenCode 连同原生二进制文件，占 Action 所装 108 个包中的 97 个、175 MB 中的约 165 MB。如果 base 分支配置里的模型都在你声明的端点上，并且配置设了 `"runtime": "direct"`（[选择运行时](./providers#选择运行时)），设置 `opencode: false`（v0.3.0 新增），只装 11 个包。此时如果配置选的是 `opencode`，评审会在调用任何模型之前以退出码 `2` 停下，并说明缺了哪个包。
 
 ```yaml
-      - uses: jma49/Open-CR-Agent@<commit> # v0.6.0
+      - uses: jma49/Open-CR-Agent@<commit> # v0.7.0
         with:
           opencode: false
         env:
@@ -114,7 +115,7 @@ jobs:
 - 这次没被报告、而代码没变的问题列为**本次未复现**：模型运行有波动，所以它保持打开，按原严重程度计入结论，直到代码被修改或被驳回。同样的代码得到同样的结论。
 - 所在文件这次没被审查的问题列为**未重新检查**，保持打开。
 
-由审查者来做主。有写权限（admin、maintain 或 write）且不是 PR 作者的人，resolve 评论串、回复 `/ocra dismiss`，或者回复以明确的拒绝开头（"won't fix"、"will not fix"、"by design"、"false positive"、"not a bug"、"working as intended"、"intended behavior"）且不是问句，就驳回了这条问题。被驳回的问题不再计入，除非之后的运行以更高严重程度发现它。这些词出现在回复其他位置（"this is not intended, good catch"、"is this by design?"）不算，"I disagree" 也不算。这些人的其他回复会在问题再次出现时交给 Judge；Judge 可以凭具体理由丢弃它，但已确认的 critical 不行。作者的回复不会交给 Judge，也不能驳回；被别人编辑过的回复不算数。没有行内评论串的问题，请用 [`ocra memory`](./cli) 驳回。
+由维护者来做主。维护者，即有写权限（admin、maintain 或 write）且不是 PR 作者的人，resolve 评论串、回复 `/ocra dismiss`，或者回复以明确的拒绝开头（"won't fix"、"will not fix"、"by design"、"false positive"、"not a bug"、"working as intended"、"intended behavior"）且不是问句，就驳回了这条问题。被驳回的问题在这个 PR 里不再计入，除非之后的运行以更高严重程度发现它。这些词出现在回复其他位置（"this is not intended, good catch"、"is this by design?"）不算，"I disagree" 也不算。这些人的其他回复会在问题再次出现时交给 Judge；Judge 可以凭具体理由丢弃它，但已确认的 critical 不行。作者的回复不会交给 Judge，也不能驳回；被别人编辑过的回复不算数。没有行内评论串的问题无法驳回，改用 [`ocra memory`](./cli#ocra-memory) 让它静默：`.ocra/memory.json` 进入 base 分支后，不论严重程度，每个 PR 都不再报告它。
 
 ### 可提交的建议
 
@@ -136,16 +137,16 @@ jobs:
   review:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
       - id: ocra
-        uses: jma49/Open-CR-Agent@82a3f1183a3177e9efa401d87eb95dea495ef619 # v0.6.0
+        uses: jma49/Open-CR-Agent@6d4d4a21b6334c086e0f884c240d550b2e4c1f46 # v0.7.0
         with:
           sarif: true
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-      - uses: github/codeql-action/upload-sarif@v4
+      - uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
         # 审查不完整时上一步会失败，这里也照样上传。
         if: ${{ !cancelled() && steps.ocra.outputs.sarif != '' }}
         with:
@@ -164,7 +165,7 @@ jobs:
 
 ```yaml
       - run: pipx run semgrep scan --config p/default --metrics=off --sarif --output semgrep.sarif
-      - uses: jma49/Open-CR-Agent@82a3f1183a3177e9efa401d87eb95dea495ef619 # v0.6.0
+      - uses: jma49/Open-CR-Agent@6d4d4a21b6334c086e0f884c240d550b2e4c1f46 # v0.7.0
         with:
           args: --import-sarif semgrep.sarif
         env:
@@ -207,10 +208,6 @@ permissions:
   contents: read
   pull-requests: write
 
-concurrency:
-  group: ocra-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
-
 jobs:
   review:
     # Members and collaborators: every push. Anyone else: one review each
@@ -219,14 +216,25 @@ jobs:
       (github.event.action == 'labeled' && github.event.label.name == 'ocra-review') ||
       (github.event.action != 'labeled' &&
         contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.pull_request.author_association))
+    # One review per pull request at a time: a new push cancels the older run.
+    # The key repeats the if:, so a run the if: skips gets a group of its
+    # own and cannot cancel the review in progress.
+    concurrency:
+      group: >-
+        ocra-${{ github.event.pull_request.number }}-${{
+          ((github.event.action == 'labeled' && github.event.label.name == 'ocra-review') ||
+           (github.event.action != 'labeled' &&
+             contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.pull_request.author_association)))
+          && 'review' || github.run_id }}
+      cancel-in-progress: true
     runs-on: ubuntu-latest
     steps:
       # The base branch. Nothing from the pull request is checked out.
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
-      - uses: jma49/Open-CR-Agent@82a3f1183a3177e9efa401d87eb95dea495ef619 # v0.6.0
+      - uses: jma49/Open-CR-Agent@6d4d4a21b6334c086e0f884c240d550b2e4c1f46 # v0.7.0
         with:
           args: --max-cost-usd 2
         env:
@@ -236,7 +244,8 @@ jobs:
 GitHub 提醒慎用 `pull_request_target`，是因为构建 PR 代码的 job 会带着你的 secret 运行这些代码。ocra 不运行 PR 里的任何东西（[威胁模型](./threat-model)）；workflow 也要保持这一点：
 
 - **不要在这里检出、安装、构建或测试 PR：**不要写 `ref: ${{ github.event.pull_request.head.sha }}`，不要安装依赖，不要跑测试。这些放到单独的 `pull_request` workflow 里，fork 的 PR 在那里拿不到 secret。
-- **保留 `if:` 门槛。**任何人都能开 PR，而每次审查都要花钱：外部贡献者的 PR 在维护者每加一次标签时审查一次（下次先移除标签再加上）。`--max-cost-usd` 限制每次审查的花费。
+- **保留 `if:` 门槛。**任何人都能开 PR，而每次审查都要花钱：外部贡献者的 PR 在维护者每加一次标签时审查一次（下次先移除标签再加上）。外部作者在带标签的审查进行中 push，这次运行会被跳过，那次审查继续进行；要审查新的 head，重新加上标签。`--max-cost-usd` 限制每次审查的花费。
+- **把条件留在 concurrency 组名里，改的时候两处一起改。**被 `if:` 跳过的运行（比如加了无关的标签）进入自己的组，不会取消正在进行的审查。
 - **使用只用于这些审查的模型 key**，并在供应商那里设置花费上限。
 - **按提交固定 Action。**
 
@@ -259,31 +268,38 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: ocra-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
-
 jobs:
   review:
     if: >-
       (github.event.action == 'labeled' && github.event.label.name == 'ocra-review') ||
       (github.event.action != 'labeled' &&
         contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.pull_request.author_association))
+    # 每个 PR 同一时间只有一次审查：新的 push 会取消较早的运行。
+    # 组名重复了 if: 的条件，被 if: 跳过的运行进入自己的组，
+    # 不会取消正在进行的审查。
+    concurrency:
+      group: >-
+        ocra-${{ github.event.pull_request.number }}-${{
+          ((github.event.action == 'labeled' && github.event.label.name == 'ocra-review') ||
+           (github.event.action != 'labeled' &&
+             contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.pull_request.author_association)))
+          && 'review' || github.run_id }}
+      cancel-in-progress: true
     runs-on: ubuntu-latest
     # 它的 secret 只给在默认分支上运行的任务。
     environment: ocra-review
     steps:
       - id: app
-        uses: actions/create-github-app-token@v3
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
           client-id: ${{ vars.OCRA_APP_CLIENT_ID }}
           private-key: ${{ secrets.OCRA_APP_KEY }}
       # 默认分支。不检出 PR 里的任何东西。
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
-      - uses: jma49/Open-CR-Agent@82a3f1183a3177e9efa401d87eb95dea495ef619 # v0.6.0
+      - uses: jma49/Open-CR-Agent@6d4d4a21b6334c086e0f884c240d550b2e4c1f46 # v0.7.0
         with:
           github-token: ${{ steps.app.outputs.token }}
           args: --max-cost-usd 2

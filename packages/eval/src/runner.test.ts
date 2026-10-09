@@ -39,6 +39,27 @@ if (args[args.indexOf("--from") + 1].startsWith("session:")) {
   writeFileSync(out, JSON.stringify(report({ runId, tasks: [task("correctness-1", "completed")] })));
   process.exit(0);
 }
+// A review that lost a task to the quota, with its session; resumed, it
+// completes the rest. The resumed run ids are logged.
+if (args[args.indexOf("--from") + 1] === "resumable") {
+  const resume = args.indexOf("--resume");
+  const runId = resume < 0 ? "run-1" : "run-2";
+  if (resume >= 0) appendFileSync(${JSON.stringify(join(dir, "resumed.log"))}, args[resume + 1] + "\\n");
+  mkdirSync(".ocra/sessions/" + runId, { recursive: true });
+  // What each task read; the lost task of run-1 read src/lost.ts.
+  const events = [{ type: "run_started", runId },
+    { type: "task_progress", taskId: "performance-1", message: "", attempt: { read: ["src/perf.ts"] } },
+    { type: "task_reported", taskId: "performance-1", key: "k-perf", findings: [] },
+    { type: "task_progress", taskId: "correctness-1", message: "", attempt: { read: [resume < 0 ? "src/lost.ts" : "src/redone.ts"] } }];
+  if (resume >= 0) events.splice(1, 1, { type: "task_finished", outcome: { taskId: "performance-1", reusedFrom: "run-1" } });
+  writeFileSync(".ocra/sessions/" + runId + "/events.jsonl", events.map((e) => JSON.stringify(e) + "\\n").join(""));
+  const tasks = resume < 0
+    ? [task("performance-1", "completed"), task("correctness-1", "failed", "out of quota for this run")]
+    : [{ ...task("performance-1", "completed"), reusedFrom: "run-1" }, task("correctness-1", "completed")];
+  writeFileSync(out, JSON.stringify(report({ runId, tasks,
+    usage: { ...zero, costUsd: resume < 0 ? 0.3 : 0.2 } })));
+  process.exit(resume < 0 ? 3 : 0);
+}
 if (args[args.indexOf("--from") + 1] === "fail") { process.stderr.write("boom\\n"); process.exit(2); }
 if (args[args.indexOf("--from") + 1] === "quota") {
   writeFileSync(out, JSON.stringify(report({ tasks: [task("correctness-1", "failed",
@@ -229,6 +250,56 @@ describe("runInstances", () => {
 
     await runInstances(instances, { ...options, retryFailed: true });
     expect(calls()).toEqual(["base", "cut", "base", "cut"]);
+  });
+
+  it("resumes a review that lost tasks to the quota instead of paying for it again", async () => {
+    const dir = temp();
+    const logs: string[] = [];
+    const options = {
+      runDir: join(dir, "run"),
+      reposDir: join(dir, "repos"),
+      command: [process.execPath, fakeOcra(dir)],
+      timeoutMs: 30_000,
+      prepare: async () => dir,
+      log: (message: string) => logs.push(message),
+    };
+    const instances = [instance("a", "resumable")];
+    const [first] = await runInstances(instances, options);
+    expect(first).toMatchObject({ status: "reviewed", runId: "run-1" });
+
+    logs.length = 0;
+    const [retried] = await runInstances(instances, { ...options, retryFailed: true });
+    expect(readFileSync(join(dir, "resumed.log"), "utf8")).toBe("run-1\n");
+    expect(retried).toMatchObject({ status: "reviewed", runId: "run-2" });
+    // What the PR cost in all: the attempt resumed and the one that resumed it.
+    expect(retried?.usage.costUsd).toBeCloseTo(0.5);
+    expect(logs.join("\n")).toContain(
+      "$0.2000 (resumed run-1, 1 task(s) reused; this PR $0.5000) (total $0.2000)",
+    );
+    // The funnel reads what the reused task read in run-1, and nothing else of run-1.
+    const events = readFileSync(join(dir, "run", "events", "a.jsonl"), "utf8");
+    expect(events).toContain('"runId":"run-1"');
+    expect(events).toContain('"runId":"run-2"');
+    expect(events).toContain("src/perf.ts");
+    expect(events).toContain("src/redone.ts");
+    expect(events).not.toContain("src/lost.ts");
+  });
+
+  it("reviews a lost PR afresh when the earlier session is gone", async () => {
+    const dir = temp();
+    const options = {
+      runDir: join(dir, "run"),
+      reposDir: join(dir, "repos"),
+      command: [process.execPath, fakeOcra(dir)],
+      timeoutMs: 30_000,
+      prepare: async () => dir,
+      log: () => {},
+    };
+    const instances = [instance("a", "resumable")];
+    await runInstances(instances, options);
+    rmSync(join(dir, ".ocra", "sessions", "run-1"), { recursive: true });
+    await runInstances(instances, { ...options, retryFailed: true });
+    expect(() => readFileSync(join(dir, "resumed.log"), "utf8")).toThrow();
   });
 
   it("runs a PR again whose saved result cannot be read, saying so", async () => {

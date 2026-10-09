@@ -1,5 +1,4 @@
-import { createHash, randomBytes } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
 import type {
   ReviewerCounts,
@@ -9,11 +8,11 @@ import type {
 } from "@open-cr-agent/cloud-contract";
 import { coverageGaps, type ReviewReport, type Verification } from "@open-cr-agent/core";
 import { verificationSchema } from "@open-cr-agent/core/internal";
+import { machineSecret } from "../io/private-file.js";
 import { VERSION } from "../version.js";
 import { CloudClient, CloudError, sessionLostReason } from "./client.js";
 import { readCredentials } from "./credentials.js";
 import type { CloudDeps } from "./deps.js";
-import { createPrivateFile, writePrivateFile } from "./private-file.js";
 
 // After a review, a signed-in CLI sends ocra Cloud its counts (ADR-0024):
 // the verdict, how many findings of each severity, files and tasks, tokens
@@ -93,27 +92,26 @@ function perReviewer(
     const r = of(task.reviewer);
     r.tasks += 1;
     if (task.status === "failed" || task.status === "timed_out") r.failedTasks += 1;
-    r.costUsd += task.usage.costUsd;
+    // A reused task's usage is what the earlier run paid; this run paid nothing for it.
+    if (task.reusedFrom === undefined) r.costUsd += task.usage.costUsd;
   }
   const verification = Object.fromEntries(verificationSchema.options.map((v) => [v, 0])) as Record<
     Verification,
     number
   >;
-  const reviewerOf = new Map<string, string>();
   for (const finding of report.findings) {
     of(finding.reviewer).findings[finding.severity] += 1;
     verification[finding.verification ?? "unchecked"] += 1;
-    if (!reviewerOf.has(finding.fingerprint)) reviewerOf.set(finding.fingerprint, finding.reviewer);
   }
-  const outcomeReviewer = (f: { fingerprint: string; reviewer?: string }) =>
-    f.reviewer ?? reviewerOf.get(f.fingerprint);
+  // reconcile keeps fixed and dismissed findings out of report.findings, so
+  // only the reviewer the earlier review recorded can be credited.
   const dismissed = new Map(
-    (report.rereview?.dismissed ?? []).map((f) => [f.fingerprint, outcomeReviewer(f)]),
+    (report.rereview?.dismissed ?? []).map((f) => [f.fingerprint, f.reviewer]),
   );
   const fixed = new Map(
     (report.rereview?.fixed ?? [])
       .filter((f) => !dismissed.has(f.fingerprint))
-      .map((f) => [f.fingerprint, outcomeReviewer(f)]),
+      .map((f) => [f.fingerprint, f.reviewer]),
   );
   for (const reviewer of fixed.values()) if (reviewer) of(reviewer).fixed += 1;
   for (const reviewer of dismissed.values()) if (reviewer) of(reviewer).dismissed += 1;
@@ -125,31 +123,8 @@ function perReviewer(
 }
 
 /** This machine's random salt, kept beside the credentials, made on first use. */
-async function machineSalt(credentialsPath: string): Promise<string> {
-  const path = join(dirname(credentialsPath), "upload-salt");
-  const existing = await readSalt(path);
-  if (existing !== "unreadable") {
-    if (existing) return existing;
-    // Two first reviews at once agree on the salt the first of them made.
-    const fresh = randomBytes(32).toString("hex");
-    if (await createPrivateFile(path, `${fresh}\n`)) return fresh;
-    const made = await readSalt(path);
-    if (made && made !== "unreadable") return made;
-  }
-  const fresh = randomBytes(32).toString("hex");
-  await writePrivateFile(path, `${fresh}\n`);
-  return fresh;
-}
-
-async function readSalt(path: string): Promise<string | "unreadable" | undefined> {
-  let text: string;
-  try {
-    text = await readFile(path, "utf8");
-  } catch {
-    return undefined;
-  }
-  const salt = text.trim();
-  return /^[0-9a-f]{64}$/.test(salt) ? salt : "unreadable";
+function machineSalt(credentialsPath: string): Promise<string> {
+  return machineSecret(join(dirname(credentialsPath), "upload-salt"));
 }
 
 /**

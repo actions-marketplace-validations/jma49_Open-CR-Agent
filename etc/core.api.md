@@ -1099,6 +1099,7 @@ export const reportOutputSchema: z.ZodObject<{
             cachedTokens: z.ZodNumber;
             costUsd: z.ZodNumber;
         }, z.core.$strict>;
+        reusedFrom: z.ZodExactOptional<z.ZodString>;
     }, z.core.$strict>>;
     skipped: z.ZodArray<z.ZodObject<{
         reviewer: z.ZodString;
@@ -1202,6 +1203,29 @@ const repoRuleSchema: z.ZodObject<{
 export const RESUME_MESSAGE: string;
 
 // @public (undocumented)
+export interface ResumedRun {
+    // (undocumented)
+    bundles: readonly {
+        label: string;
+        files: readonly string[];
+    }[];
+    // (undocumented)
+    runId: string;
+    // (undocumented)
+    tasks: readonly ResumedTask[];
+}
+
+// @public (undocumented)
+export interface ResumedTask {
+    // (undocumented)
+    findings: readonly TaskFinding[];
+    // (undocumented)
+    key: string;
+    // (undocumented)
+    outcome: TaskOutcome;
+}
+
+// @public (undocumented)
 export function review(options: ReviewOptions): Promise<ReviewReport>;
 
 // @public (undocumented)
@@ -1278,6 +1302,10 @@ export type ReviewEvent = {
     type: "files_bundled";
     strategy: string;
     bundles: number;
+    groups: {
+        label: string;
+        files: string[];
+    }[];
     warnings: string[];
 } | {
     type: "matrix_planned";
@@ -1304,6 +1332,11 @@ export type ReviewEvent = {
     reason: "outside_bundle";
     file: string;
     title: string;
+} | {
+    type: "task_reported";
+    taskId: string;
+    key: string;
+    findings: TaskFinding[];
 } | {
     type: "task_finished";
     outcome: TaskOutcome;
@@ -1360,6 +1393,8 @@ export interface ReviewOptions {
     onEvent?: (event: ReviewEvent) => void;
     // (undocumented)
     readTrusted?: (path: string) => Promise<string | undefined>;
+    // (undocumented)
+    resume?: ResumedRun;
     // (undocumented)
     reviewerOverrides?: ReviewerOverrides;
     // (undocumented)
@@ -1638,6 +1673,7 @@ export const sessionJsonlPlugin: OcraPlugin<z.infer<typeof sessionSettings>>;
 const sessionSettings: z.ZodObject<{
     dir: z.ZodString;
     id: z.ZodString;
+    sealKey: z.ZodExactOptional<z.ZodString>;
 }, z.core.$strict>;
 
 // @public (undocumented)
@@ -1686,6 +1722,14 @@ export class SpendLimitReached extends OcraError {
 export function startPlugins(plugins: readonly OcraPlugin[], options?: PluginHostOptions): Promise<PluginRegistry>;
 
 // @public (undocumented)
+export interface TaskFinding {
+    // (undocumented)
+    model?: string;
+    // (undocumented)
+    reported: ReportedFinding;
+}
+
+// @public (undocumented)
 export interface TaskOutcome {
     // (undocumented)
     bundle: string;
@@ -1699,6 +1743,8 @@ export interface TaskOutcome {
     files: string[];
     // (undocumented)
     findings: number;
+    // (undocumented)
+    reusedFrom?: string;
     // (undocumented)
     reviewer: string;
     // (undocumented)

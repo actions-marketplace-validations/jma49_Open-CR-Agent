@@ -5,7 +5,11 @@
 // The Action as the manual pins it: the release's commit and its version.
 // `node scripts/changelog.mjs action-pin <version>` moves this line with the
 // manual's; scripts/lib/manual-pins.test.mjs fails when they differ.
-export const ACTION_USES = "jma49/Open-CR-Agent@82a3f1183a3177e9efa401d87eb95dea495ef619 # v0.6.0";
+export const ACTION_USES = "jma49/Open-CR-Agent@6d4d4a21b6334c086e0f884c240d550b2e4c1f46 # v0.7.0";
+
+// By commit like the Action, so a moved tag cannot change what runs with the
+// workflow's secrets; scripts/lib/manual-pins.test.mjs keeps every recipe pinned.
+const CHECKOUT_USES = "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1";
 
 export const REVIEW_LABEL = "ocra-review";
 
@@ -44,6 +48,21 @@ function step(lines: readonly string[], indent: string): string[] {
   return [`${indent}- ${first}`, ...rest.map((line) => `${indent}  ${line}`)];
 }
 
+const ONE_REVIEW = "    # One review per pull request at a time: a new push cancels the older run.";
+
+// The fork-safe job's condition, in its if: and in its concurrency group.
+const GATE = [
+  `(github.event.action == 'labeled' && github.event.label.name == '${REVIEW_LABEL}') ||`,
+  "(github.event.action != 'labeled' &&",
+  `  contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.pull_request.author_association))`,
+];
+
+function parenthesized(lines: readonly string[]): string[] {
+  return lines.map(
+    (line, i) => `${i === 0 ? "(" : " "}${line}${i === lines.length - 1 ? ")" : ""}`,
+  );
+}
+
 function sameRepo(action: readonly string[]): string[] {
   return [
     "name: ocra",
@@ -53,16 +72,17 @@ function sameRepo(action: readonly string[]): string[] {
     "  contents: read",
     "  pull-requests: write",
     "",
-    "# One review per pull request at a time: a new push cancels the older run.",
-    "concurrency:",
-    `  group: ocra-${expr("github.event.pull_request.number")}`,
-    "  cancel-in-progress: true",
-    "",
     "jobs:",
     "  review:",
+    "    # A pull request from a fork gets no secrets on pull_request: skip it.",
+    "    if: github.event.pull_request.head.repo.full_name == github.repository",
+    ONE_REVIEW,
+    "    concurrency:",
+    `      group: ocra-${expr("github.event.pull_request.number")}`,
+    "      cancel-in-progress: true",
     "    runs-on: ubuntu-latest",
     "    steps:",
-    "      - uses: actions/checkout@v7",
+    `      - uses: ${CHECKOUT_USES}`,
     "        with:",
     "          fetch-depth: 0",
     ...step(action, "      "),
@@ -80,22 +100,25 @@ function forkSafe(action: readonly string[]): string[] {
     "  contents: read",
     "  pull-requests: write",
     "",
-    "concurrency:",
-    `  group: ocra-${expr("github.event.pull_request.number")}`,
-    "  cancel-in-progress: true",
-    "",
     "jobs:",
     "  review:",
     "    # Members and collaborators: every push. Anyone else: one review each",
     `    # time a maintainer adds the ${REVIEW_LABEL} label.`,
     "    if: >-",
-    `      (github.event.action == 'labeled' && github.event.label.name == '${REVIEW_LABEL}') ||`,
-    "      (github.event.action != 'labeled' &&",
-    `        contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.pull_request.author_association))`,
+    ...GATE.map((line) => `      ${line}`),
+    ONE_REVIEW,
+    "    # The key repeats the if:, so a run the if: skips gets a group of its",
+    "    # own and cannot cancel the review in progress.",
+    "    concurrency:",
+    "      group: >-",
+    `        ocra-${expr("github.event.pull_request.number")}-\${{`,
+    ...parenthesized(GATE).map((line) => `          ${line}`),
+    "          && 'review' || github.run_id }}",
+    "      cancel-in-progress: true",
     "    runs-on: ubuntu-latest",
     "    steps:",
     "      # The base branch. Nothing from the pull request is checked out.",
-    "      - uses: actions/checkout@v7",
+    `      - uses: ${CHECKOUT_USES}`,
     "        with:",
     "          fetch-depth: 0",
     "          # In a private repository, remove this line: ocra fetches the",

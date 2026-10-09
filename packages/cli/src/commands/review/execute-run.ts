@@ -1,11 +1,13 @@
 import {
   type AgentRuntime,
+  OcraError,
+  type ResumedRun,
   type ReviewOptions,
   type ReviewReport,
   review,
   type SarifLog,
 } from "@open-cr-agent/core";
-import { REVIEW_DEFAULTS } from "@open-cr-agent/core/internal";
+import { REVIEW_DEFAULTS, readResumedRun } from "@open-cr-agent/core/internal";
 import { withCloudProviders } from "../../cloud/providers.js";
 import { type CloudReview, prepareCloudReview } from "../../cloud/review.js";
 import { agentChains } from "../../config/cli-config.js";
@@ -39,6 +41,7 @@ export async function executeRun(
   deps: ReviewDeps,
 ): Promise<ExecutedRun> {
   const sarif = await loadSarifLogs(args.importSarif ?? [], deps.cwd);
+  const resume = args.resume ? await resumedRun(run, args.resume) : undefined;
   const cloudReview = run.signedInCloud
     ? await prepareCloudReview(run.root, run.signedInCloud, run.warn, run.target.repository)
     : undefined;
@@ -56,6 +59,7 @@ export async function executeRun(
   try {
     const report = await review({
       ...prepareReview(run, args, sampling, sarif, cloudReview),
+      ...(resume ? { resume } : {}),
       signal: interrupt.signal,
       vcs: run.vcs,
       runtime,
@@ -76,6 +80,18 @@ export async function executeRun(
     stopCloud();
     await runtime.dispose?.();
   }
+}
+
+// The earlier run --resume names, from what ocra sealed on this machine.
+function resumedRun(run: ResolvedRun, runId: string): Promise<ResumedRun> {
+  const { dir, sealKey } = run.session;
+  if (!sealKey) {
+    throw new OcraError(
+      "INPUT_INVALID",
+      "--resume: this machine has no usable session key, so no session can be checked",
+    );
+  }
+  return readResumedRun(dir, runId, sealKey, run.warn);
 }
 
 // The runtime the configuration names, with ocra Cloud's providers when signed in.

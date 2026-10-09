@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
 import { OcraError } from "@open-cr-agent/core";
+import { errnoCode } from "@open-cr-agent/core/internal";
 
 export interface GitOptions {
   cwd: string;
@@ -34,7 +35,7 @@ export class GitError extends OcraError {
 }
 
 const MAX_OUTPUT_BYTES = 512 * 1024 * 1024;
-const CLOSED_PIPE = new Set(["EPIPE", "ENOTCONN", "ECONNRESET"]);
+const CLOSED_PIPE = new Set(["EPIPE", "ENOTCONN", "ECONNRESET", "EOF"]);
 
 export function git(args: readonly string[], options: GitOptions): Promise<string> {
   const okExitCodes = options.okExitCodes ?? [0];
@@ -70,10 +71,10 @@ export function git(args: readonly string[], options: GitOptions): Promise<strin
     );
     // git may exit before reading stdin; its exit code already reports the
     // outcome, so a broken pipe on our side carries no information. Which
-    // error that is depends on timing and platform (EPIPE, or ENOTCONN on
-    // macOS when the pipe closed before the write).
-    child.stdin?.on("error", (error: NodeJS.ErrnoException) => {
-      if (!CLOSED_PIPE.has(error.code ?? "")) reject(error);
+    // error that is depends on timing and platform (EPIPE, ENOTCONN on
+    // macOS when the pipe closed before the write, EOF on Windows).
+    child.stdin?.on("error", (error) => {
+      if (!CLOSED_PIPE.has(errnoCode(error) ?? "")) reject(error);
     });
     if (options.input === undefined) child.stdin?.end();
     else child.stdin?.end(options.input);

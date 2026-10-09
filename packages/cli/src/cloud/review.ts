@@ -1,6 +1,7 @@
 import type { ReviewSource } from "@open-cr-agent/cloud-contract";
-import type { MemoryEntry, ReviewReport } from "@open-cr-agent/core";
+import { errorMessage, type MemoryEntry, type ReviewReport } from "@open-cr-agent/core";
 import type { Output } from "../io/output.js";
+import { UnreadableSecretError } from "../io/private-file.js";
 import { originRepository } from "../repository-id.js";
 import { readAccountSalt, saveAccountSalt } from "./account-salt.js";
 import { CloudClient, type CloudSessionLost, sessionLostReason } from "./client.js";
@@ -32,15 +33,31 @@ export function sessionLostWarning(
 }
 
 /**
- * Undefined when the saved session is gone; a failure to reach ocra Cloud is
- * one warning. The repository is the pull or merge request's when given,
- * else origin's.
+ * Undefined when the saved session is gone or this machine's salt cannot be
+ * read; a failure to reach ocra Cloud is one warning. The repository is the
+ * pull or merge request's when given, else origin's.
  */
 export async function prepareCloudReview(
   root: string,
   deps: CloudDeps,
   warn: (message: string) => void,
   repository?: string,
+): Promise<CloudReview | undefined> {
+  try {
+    return await prepare(root, deps, warn, repository);
+  } catch (error) {
+    // A hash under another salt would count the repository as a new one.
+    if (!(error instanceof UnreadableSecretError)) throw error;
+    warn(`${error.message}; this review sends nothing to ocra Cloud`);
+    return undefined;
+  }
+}
+
+async function prepare(
+  root: string,
+  deps: CloudDeps,
+  warn: (message: string) => void,
+  repository: string | undefined,
 ): Promise<CloudReview | undefined> {
   const id = repository ?? (await originRepository(root));
   let salt: string | null;
@@ -54,16 +71,14 @@ export async function prepareCloudReview(
   } catch (error) {
     // The salt kept from the last answer, else this machine's, still groups
     // the counts. Whether the account still shares findings is unknown, so
-    // none is sent and the account's memory is not applied.
-    warn(
-      `could not read your ocra Cloud account (${error instanceof Error ? error.message : "error"}); this review sends no findings and applies no account memory`,
-    );
+    // none is sent and the account's memory is not applied. Hashed before
+    // the warning: without a salt this review sends nothing, said once.
     const kept = await readAccountSalt(deps.credentialsPath);
-    return {
-      repoHash: await repoHash(id, deps.credentialsPath, kept),
-      shareFindings: false,
-      memory: [],
-    };
+    const hash = await repoHash(id, deps.credentialsPath, kept);
+    warn(
+      `could not read your ocra Cloud account (${errorMessage(error)}); this review sends no findings and applies no account memory`,
+    );
+    return { repoHash: hash, shareFindings: false, memory: [] };
   }
   await saveAccountSalt(deps.credentialsPath, salt);
   const hash = await repoHash(id, deps.credentialsPath, salt ?? undefined);

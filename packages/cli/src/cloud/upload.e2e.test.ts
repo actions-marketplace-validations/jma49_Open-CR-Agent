@@ -3,6 +3,8 @@ import { mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "n
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SharedFinding } from "@open-cr-agent/cloud-contract";
+import type { Finding, PriorFinding, ReviewReport } from "@open-cr-agent/core";
+import { reconcile } from "@open-cr-agent/core/internal";
 import {
   finding,
   priorFinding,
@@ -57,38 +59,74 @@ function cloud(answer: (path: string, init?: RequestInit) => Response) {
   return { deps, calls, credentialsPath };
 }
 
+// What reconcile makes of this run's findings against an earlier review whose
+// findings in `gone` have lost their code: the report's findings and its
+// re-review, as the pipeline would write them.
+function rereviewed(
+  current: Finding[],
+  prior: PriorFinding[],
+  gone: readonly string[],
+): Pick<ReviewReport, "findings" | "rereview"> {
+  const { findings, ...rereview } = reconcile({
+    findings: current,
+    reported: new Set(current.map((f) => f.fingerprint)),
+    prior: { findings: prior },
+    coverage: [],
+    stillPresent: new Map(gone.map((fingerprint) => [fingerprint, false])),
+  });
+  return { findings, rereview };
+}
+
 const report = reviewReport({
   runId: "run-1",
   tier: "lite",
   verdict: "significant_concerns",
-  findings: [
-    finding({
-      severity: "critical",
-      title: "SECRET TITLE",
-      file: "src/secret.ts",
-      body: "const key = 1",
-      reviewer: "security",
-      fingerprint: "fp-secret-critical",
-      verification: "confirmed",
-    }),
-    finding({
-      severity: "warning",
-      title: "t",
-      file: "a",
-      body: "b",
-      reviewer: "security",
-      fingerprint: "fp-dismissed",
-      verification: "uncertain",
-    }),
-    finding({
-      severity: "warning",
-      title: "t",
-      file: "a",
-      body: "b",
-      reviewer: "logic",
-      fingerprint: "fp-3",
-    }),
-  ],
+  ...rereviewed(
+    [
+      finding({
+        severity: "critical",
+        title: "SECRET TITLE",
+        file: "src/secret.ts",
+        body: "const key = 1",
+        reviewer: "security",
+        fingerprint: "fp-secret-critical",
+        verification: "confirmed",
+      }),
+      finding({
+        severity: "warning",
+        title: "t",
+        file: "a",
+        body: "b",
+        reviewer: "security",
+        fingerprint: "fp-2",
+        verification: "uncertain",
+      }),
+      finding({
+        severity: "warning",
+        title: "t",
+        file: "a",
+        body: "b",
+        reviewer: "logic",
+        fingerprint: "fp-3",
+      }),
+    ],
+    [
+      priorFinding({
+        fingerprint: "fp-gone-unknown",
+        title: "FIXED TITLE",
+        file: "src/fixed-path.ts",
+      }),
+      priorFinding({ fingerprint: "fp-gone-logic", title: "t", file: "a", reviewer: "logic" }),
+      priorFinding({
+        fingerprint: "fp-dismissed",
+        title: "DISMISSED TITLE",
+        file: "src/d.ts",
+        reviewer: "security",
+        dismissed: true,
+      }),
+    ],
+    ["fp-gone-unknown", "fp-gone-logic"],
+  ),
   coverage: [
     { path: "src/secret.ts", status: "reviewed" },
     { path: "b.ts", status: "unreviewed" },
@@ -100,29 +138,6 @@ const report = reviewReport({
     taskOutcome({ reviewer: "logic", status: "timed_out", usage: usage({ costUsd: 0.05 }) }),
     taskOutcome({ reviewer: "style", status: "cancelled", usage: usage() }),
   ],
-  // As reconcile builds it: fixed and dismissed findings are gone from
-  // findings[] and carry the reviewer the earlier review recorded, when it did.
-  rereview: {
-    fixed: [
-      priorFinding({
-        fingerprint: "fp-gone-unknown",
-        title: "FIXED TITLE",
-        file: "src/fixed-path.ts",
-      }),
-      priorFinding({ fingerprint: "fp-gone-logic", title: "t", file: "a", reviewer: "logic" }),
-    ],
-    dismissed: [
-      priorFinding({
-        fingerprint: "fp-dismissed",
-        title: "DISMISSED TITLE",
-        file: "src/d.ts",
-        reviewer: "security",
-      }),
-    ],
-    notReproduced: [],
-    notRechecked: [],
-    unchanged: [],
-  },
   unverifiedCriticals: 0,
   usage: usage({ inputTokens: 100, outputTokens: 20, costUsd: 0.5 }),
 });
@@ -194,28 +209,51 @@ describe("the review upload", () => {
     expect(up.outcomes).toEqual({ fixed: 2, dismissed: 1 });
   });
 
+  it("counts a reused task's cost to the run that paid for it, not to this one", () => {
+    const resumed = reviewReport({
+      ...report,
+      tasks: [
+        taskOutcome({
+          reviewer: "security",
+          usage: usage({ costUsd: 0.25 }),
+          reusedFrom: "20261001T100000Z-000001",
+        }),
+        taskOutcome({ reviewer: "security", usage: usage({ costUsd: 0.1 }) }),
+      ],
+      usage: usage({ costUsd: 0.1 }),
+    });
+    const up = uploadOf(resumed, "local", "f".repeat(64), 1);
+    expect(up.reviewers?.security).toMatchObject({ tasks: 2, costUsd: 0.1 });
+    expect(up.usage.costUsd).toBe(0.1);
+  });
+
   it("credits a fix or a dismissal to the reviewer the earlier review recorded", () => {
     // The fixed finding is gone from this report, so only its recorded
     // reviewer can claim it; a recorded reviewer outranks this report's.
+    // fp-3 is reported again, by logic this time, no worse than when a
+    // person dismissed it, so it stays dismissed and leaves the findings.
     const up = uploadOf(
       {
         ...report,
-        rereview: {
-          fixed: [
+        ...rereviewed(
+          [finding({ fingerprint: "fp-3", title: "t", file: "a", reviewer: "logic" })],
+          [
             priorFinding({
               fingerprint: "fp-gone",
               title: "t",
               file: "a",
               reviewer: "performance",
             }),
+            priorFinding({
+              fingerprint: "fp-3",
+              title: "t",
+              file: "a",
+              reviewer: "security",
+              dismissed: true,
+            }),
           ],
-          dismissed: [
-            priorFinding({ fingerprint: "fp-3", title: "t", file: "a", reviewer: "security" }),
-          ],
-          notReproduced: [],
-          notRechecked: [],
-          unchanged: [],
-        },
+          ["fp-gone"],
+        ),
       },
       "github",
       "f".repeat(64),

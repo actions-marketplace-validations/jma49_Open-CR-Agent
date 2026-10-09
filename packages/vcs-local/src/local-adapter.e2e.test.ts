@@ -1,4 +1,5 @@
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
   realpathSync,
@@ -19,6 +20,18 @@ import { LocalGitAdapter, type LocalTarget } from "./local-adapter.js";
 const outsides: string[] = [];
 const scratch = scratchRepos("ocra-local-");
 const repo = () => scratch.create();
+
+// Whether the temporary directory's file system is case- and
+// normalization-insensitive, as APFS is by default: one name opens another.
+const foldsNames = (() => {
+  const dir = mkdtempSync(join(tmpdir(), "ocra-fold-"));
+  try {
+    writeFileSync(join(dir, "cafe\u0301"), "");
+    return existsSync(join(dir, "CAF\u00C9"));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+})();
 
 async function changes(cwd: string, target: LocalTarget) {
   const diffs = await new LocalGitAdapter({ cwd, target }).getDiff();
@@ -98,7 +111,9 @@ describe("LocalGitAdapter workspace mode", () => {
       ["pkg/a.ts", "modified"],
     ]);
     const adapter = new LocalGitAdapter({ cwd: join(r.dir, "pkg"), target: { mode: "workspace" } });
-    expect(await adapter.repositoryRoot()).toBe(realpathSync(r.dir));
+    // Native, as Windows spells the same directory in more than one way
+    // (git's C:/Users/runneradmin, the temporary directory's RUNNER~1).
+    expect(realpathSync.native(await adapter.repositoryRoot())).toBe(realpathSync.native(r.dir));
   });
 
   it("ignores user diff configuration that changes the output format", async () => {
@@ -219,7 +234,8 @@ describe("LocalGitAdapter.readFile", () => {
     const adapter = new LocalGitAdapter({ cwd: r.dir, target: { mode: "workspace" } });
     const context = reviewContext(adapter, []);
     expect(await context.readFile("notes.txt")).toBe(".env");
-    expect(await context.readFile("docs/AGENTS.md")).toBe("../.env");
+    // The link's own text, which Windows writes with its separator.
+    expect(await context.readFile("docs/AGENTS.md")).toBe(join("..", ".env"));
     expect(await context.readFile("cfg/config")).toBeUndefined();
     expect(await adapter.readFile("cfg/config")).toBeUndefined();
     await expect(context.readFile(".env")).rejects.toThrow("not allowed");
@@ -238,6 +254,21 @@ describe("LocalGitAdapter.readFile", () => {
     const adapter = new LocalGitAdapter({ cwd: r.dir, target: { mode: "workspace" } });
     expect(await adapter.readFile("..notes.md")).toBe("ok\n");
   });
+
+  it.skipIf(!foldsNames)(
+    "reads a file only under its own name, not one the file system folds to it",
+    async () => {
+      const r = repo();
+      r.write("certs/server.key", "KEY\n");
+      r.write("cafe\u0301.md", "nfd\n");
+      const adapter = new LocalGitAdapter({ cwd: r.dir, target: { mode: "workspace" } });
+      expect(await adapter.readFile("certs/server.key")).toBe("KEY\n");
+      expect(await adapter.readFile("certs/SERVER.KEY")).toBeUndefined();
+      expect(await adapter.readFile("certs/server.\u212Aey")).toBeUndefined();
+      // git on macOS reports names precomposed whatever form they have on disk.
+      expect(await adapter.readFile("caf\u00E9.md")).toBe("nfd\n");
+    },
+  );
 });
 
 describe("LocalGitAdapter.searchCode", () => {

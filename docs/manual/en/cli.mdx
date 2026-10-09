@@ -5,7 +5,7 @@ description: Commands, options, output and exit codes.
 
 ## ocra init
 
-Writes `.ocra/config.json` for the repository you are in (with `--github`, also `.github/workflows/ocra.yml`) and prints what is left to do. It calls no model or network service and never runs `gh` or `git`.
+Writes `.ocra/config.json` for the repository you are in (with `--github`, also `.github/workflows/ocra.yml`) and prints what is left to do. It calls no model or network service, never runs `gh`, and runs `git` only to find the repository's root (`git rev-parse --show-toplevel`).
 
 ```bash
 ocra init                          # .ocra/config.json for the key in your environment
@@ -17,7 +17,7 @@ ocra init --provider anthropic     # a provider whose key is not in this shell
 | Option | Meaning |
 |---|---|
 | `--github` | Also write `.github/workflows/ocra.yml`, the [fork recipe](./github#pull-requests-from-forks) on `pull_request_target`: members' and collaborators' pull requests are reviewed on every push, others' each time a maintainer adds the `ocra-review` label; only the base branch is checked out, and nothing from the pull request runs |
-| `--same-repo-only` | With `--github`, the plain [`pull_request` workflow](./github#github-action) instead. Pull requests from forks get no secrets there and are not reviewed |
+| `--same-repo-only` | With `--github`, the plain [`pull_request` workflow](./github#github-action) instead. It skips pull requests from forks, which get no secrets there |
 | `--provider <name>` | `gemini`, `anthropic`, `openai` or `openrouter`, in place of the key found in the environment |
 | `--force` | Replace existing files. Without it, an existing file is kept, and ocra init says so |
 
@@ -49,7 +49,7 @@ For Gemini, the file is:
 
 The key is never written; OpenCode reads it from `GEMINI_API_KEY`. Change the models like any [configuration](./configuration).
 
-**The workflow** is the [GitHub](./github) recipe with the key as a secret, `--max-cost-usd 2` per review, `opencode: false` on the direct runtime, and the Action pinned to this release's commit. `ocra init --github` then prints:
+**The workflow** is the [GitHub](./github) recipe with the key as a secret, `--max-cost-usd 2` per review, `opencode: false` on the direct runtime, and the Action pinned to this release's commit (`actions/checkout` by commit too). `ocra init --github` then prints:
 
 ```text
 Wrote .ocra/config.json: Gemini models through GEMINI_API_KEY, on the OpenCode runtime.
@@ -82,20 +82,21 @@ ocra review [options]
 | `--to <ref>` | End of the range; defaults to `HEAD`; requires `--from` |
 | `--commit <sha>` | Review a single commit against its parent |
 | `--format text\|json\|sarif` | Output format; default `text`. `sarif` writes [SARIF 2.1.0](#sarif-output) |
-| `--output <file>` | Write the result to a file instead of stdout |
+| `--output <file>` | Write the result to a file instead of stdout. The file is replaced whole; a symbolic link at that path, or at a directory on the way inside the repository, is refused (exit `2`, before any model call), and so is a path that exists but is not a regular file. So `/dev/stdout`, a named pipe and process substitution (`>(…)`) do not work: leave `--output` out to write to stdout |
 | `--pr <number>` | Review a GitHub pull request; see [GitHub pull requests](./github) |
 | `--repo <owner/name>` | Repository of `--pr` (default: `GITHUB_REPOSITORY` or `origin`) |
 | `--mr <iid>` | Review a GitLab merge request; see [GitLab merge requests](./gitlab) |
 | `--project <id\|path>` | Project of `--mr` (default: `CI_PROJECT_ID` or `origin`) |
 | `--publish` | With `--pr` or `--mr`: post the review to the pull or merge request |
 | `--full` | With `--pr` or `--mr`: review every file, not only what changed since the previous review |
-| `--max-cost-usd <n>` | Spend limit for the run. At 80%, review tasks stop, keeping what they found; their files count as not reviewed (exit `3`). Verification and judging use the rest; past it, remaining findings are *not verified* and cannot block. Tasks report spend about every 10 seconds, so a run can overshoot by that much per task plus its step in progress. Tasks run bundle by bundle, so a limited run finishes some files; with `--pr` the next review continues with the rest |
+| `--max-cost-usd <n>` | Spend limit for the run. At 80%, review tasks still running stop, keeping what they found; their files count as not reviewed (exit `3`), unless the task had already finished its review. Verification and judging use the rest; past it, remaining findings are *not verified* and cannot block. Tasks report spend about every 10 seconds, so a run can overshoot by that much per task plus its step in progress. Tasks run bundle by bundle, so a limited run finishes some files; with `--pr` the next review continues with the rest |
 | `--plan` | Free, no model call: show selected and excluded files, bundles, review tasks and each first prompt's size (with the plan call a task makes under `--ultra` or for a bundle of five or more files). Where a task's chain is known, estimate those prompts' input cost at the first model's price, per task and in total: a [declared provider's](./providers#your-own-endpoint) price, `input unpriced` for a price of 0 or ocra Cloud, else `input price unknown`. Output, later turns, verification and judging are not estimated. Light-model grouping is skipped, so a large change shows one file per bundle (by directory past 20 files). With `--pr` it plans a full review. No session log |
 | `--import-sarif <file>` | Add the results of an analyzer's SARIF 2.1.0 log (Semgrep, CodeQL and others) to the review; repeatable. See [SARIF input](#sarif-input). Not with `--plan` |
 | `--ultra` | Favor recall over cost; see [Modes](./how-it-works#modes) |
 | `--reviewers <ids>` | Run only these reviewers, comma-separated (for example `security`) |
 | `--temperature <n>` | Sampling temperature, 0 to 2; overrides `sampling.temperature` ([Configuration](./configuration#execution)) |
 | `--seed <n>` | Sampling seed where runtime and provider support one (not `opencode`); overrides `sampling.seed` |
+| `--resume <run-id>` | Retry an earlier run of this review without paying again for what it finished: its completed tasks are reused when their inputs are unchanged (same commits, configuration, prompts, ocra version and sampling), and only the rest run; a task that failed or was cut off before it finished (partly reviewed) runs again. Reads [the session](#sessions) `.ocra/sessions/<run-id>`, and only what ocra on this machine wrote there: a session from another machine or user, or one that came with the change, is refused (exit `2`), and lines added to it are ignored with a warning. A task that cannot be reused runs and a warning says how many. Reused tasks cost nothing, so a spend limit never keeps them out; they show `reusedFrom` in the [JSON output](#json-output), and the run's `usage` is only what it paid. Not with `--plan` |
 | `--config <file>` | Use this configuration file instead of `.ocra/config.json` (the base branch's with `--pr` or `--mr`); it applies with `--no-repo-config` too. See [Configuration](./configuration) |
 | `--no-repo-config` | For code you do not trust: ignore `.ocra/config.json` and its plugins (with `--pr`, the base branch's too); models come from `OCRA_MODEL_*` or `--config`; memory, rules and `AGENTS.md` from the `--from` commit, or none |
 | `-h, --help` | Show help |
@@ -190,6 +191,8 @@ Tested with Semgrep 1.178.0's log; other tools' logs follow the same standard.
 
 Every review (not `--plan`) writes `.ocra/sessions/<id>/events.jsonl` (one event per line, as the run progresses) and `report.json`. The run id `<id>` is in the first progress line, the JSON report (`runId`), the summary comment (Coverage and cost) and the SARIF log (`automationDetails.id`, `ocra/<id>`). Each task attempt's event records in `attempt` the files the reviewer read, its searches and its final text (bounded), so you can tell a file never opened from one read without findings; none of it goes into the report. The directory has its own `.gitignore`.
 
+Each line of `events.jsonl` ends with a `seal`: an HMAC keyed by a secret of yours that ocra makes on first use in `~/.config/ocra/session-key` (`$XDG_CONFIG_HOME/ocra/`, or `%APPDATA%\ocra\` on Windows), readable only by you. `--resume` reads only lines with a valid seal, so it resumes a session only on the machine and account that wrote it; deleting the key makes earlier sessions impossible to resume, nothing else. If ocra cannot make or read the key, a review warns and its session cannot be resumed; a key file it cannot read (another user's, say, after `sudo ocra`) is left as it is.
+
 ## ocra metrics
 
 Counts over the finished reviews in `.ocra/sessions/`, from each session's `report.json`; no model is called:
@@ -201,7 +204,7 @@ ocra metrics --since 2026-10-01    # runs started at or after a date
 ocra metrics --sessions /srv/ocra  # another sessions directory, as on a CI runner
 ```
 
-It reports runs (by verdict, with files left unreviewed, sessions without a readable report), cost (total, per run, tokens), findings (reported, unique by fingerprint, by severity and verification), the fate of earlier findings (fixed: the code is gone later; dismissed by a reviewer; their ratio as acceptance rate), and the same per reviewer with tasks, failed tasks and cost. A fixed or dismissed finding counts for the reviewer the earlier review recorded, else the first to report its fingerprint. Only version 1 reports count; the JSON output is a versioned contract like the report.
+It reports runs (by verdict, with files left unreviewed, sessions without a readable report), cost (total, per run, tokens), findings (reported, unique by fingerprint, by severity and verification), the fate of earlier findings (fixed: the code is gone later; dismissed by a reviewer; their ratio as acceptance rate), and the same per reviewer with tasks, failed tasks and cost. A task that `--resume` reused costs nothing in the run that reused it: its cost counts once, in the run that paid for it. A fixed or dismissed finding counts for the reviewer the earlier review recorded, else the first to report its fingerprint. Only version 1 reports count; the JSON output is a versioned contract like the report.
 
 ## ocra --version
 
@@ -243,7 +246,7 @@ ocra logout                                   # ends the session on the server a
 **The session** is saved in `~/.config/ocra/credentials.json` (`$XDG_CONFIG_HOME/ocra/`, or `%APPDATA%\ocra\` on Windows), readable only by you.
 
 - It and the salts beside it are written atomically (temporary file, then rename). A file without a session counts as signed out: a review warns once, naming it, and runs without ocra Cloud; `ocra logout` removes it.
-- The access token lasts an hour; the refresh token changes on every use. Concurrent processes share the session: one renews at a time under `credentials.json.lock` (broken after 30 seconds), the others take what it saved. A 401 on a live token renews and retries once.
+- The access token lasts an hour; the refresh token changes on every use. Concurrent processes share the session: one renews at a time under `credentials.json.lock`, the others wait for it (up to two and a half minutes, printing `Waiting for another ocra process to renew the ocra Cloud session...` after five seconds; a lock older than 90 seconds, or whose process on this machine has exited, was left by a process that died and is broken) and take what it saved. `ocra login` and `ocra logout` take the same lock, and a renewal never saves over a session saved meanwhile. A 401 on a live token renews and retries once.
 - A refused renewal ends the session: a review warns `your ocra Cloud session ended: run ocra login`; `ocra whoami` exits 1.
 - If ocra Cloud is unreachable (network error, 5xx, 429), the session is kept; a review warns once and runs without your account's rules, limits (`maxCostUsd` included), models and memory, and uploads nothing; a review naming an `ocra-` model stops with an error, and `ocra whoami` exits 2. A 404 for account settings means none, without a warning.
 - If `ocra login` cannot read your login after getting tokens, it saves the session and says the login is unknown.
@@ -258,21 +261,21 @@ ocra logout                                   # ends the session on the server a
 - Prompts and quoted code pass through ocra Cloud, which records each call's model, status, token counts and duration, never the bodies.
 - A review naming no `ocra-` model reads no session and never contacts ocra Cloud; a provider your configuration declares under an `ocra-` name keeps its declaration.
 - [Effort](./configuration#effort) is sent the way ocra Cloud lists for the provider (`openai`: `reasoning_effort`; `openrouter`: `reasoning.effort`), `openai` when unlisted; an unknown style is ignored with a warning. An answer that is not a provider list stops the review.
-- On `"runtime": "direct"`, ocra renews the token five minutes before expiry for the whole run (warning once if it cannot). `opencode` reads it once at start, so ocra gives it a token outliving `runTimeoutMinutes` plus ten minutes, and warns when the run may outlast any token: calls through ocra Cloud then fail after about an hour.
+- On `"runtime": "direct"`, ocra renews the token five minutes before expiry for the whole run. If it cannot, it warns once and tries again, after one minute and then less often (at most every five minutes), past expiry too, until the run ends. `opencode` reads it once at start, so ocra gives it a token outliving `runTimeoutMinutes` plus ten minutes, and warns when the run may outlast any token: calls through ocra Cloud then fail after about an hour.
 
 **Account settings.** When signed in, `ocra review` applies your account's settings under the configuration ([Account settings](./configuration#account-settings)). The account can also turn on `ultra`, as if `--ultra` were given; `--ultra` on the command line always applies. What the account filled in is printed (`From your ocra Cloud settings: …`). `--plan` reads them too and ends with a Settings list giving each setting's source: `shared` (an extended configuration), `file`, `env` (`OCRA_MODEL_*`, `OCRA_EFFORT_*`), `account` (`ultra` included), sources joined with `+` for combined lists (`include`, `exclude`, rules; for example `shared+account`), or `default`. If ocra Cloud is unreachable, a warning says so and the plan shows the configuration alone.
 
-**What a review uploads.** After each review, a signed-in CLI sends counts: verdict, whether every file was reviewed, findings per severity, files, tasks, tokens, cost, time, source (local, GitHub, GitLab) and ocra version; per reviewer, tasks, failed tasks, findings by severity, cost and earlier findings fixed or dismissed; findings confirmed, uncertain or unchecked; and earlier findings fixed or dismissed in all (counted for the recorded reviewer; one recorded before reviewers were counts only if this review still has its fingerprint). Unless your account shares findings, no path, title, fingerprint, finding text or code is sent.
+**What a review uploads.** After each review, a signed-in CLI sends counts: verdict, whether every file was reviewed, findings per severity, files, tasks, tokens, cost, time, source (local, GitHub, GitLab) and ocra version; per reviewer, tasks, failed tasks, findings by severity, cost (without tasks reused by `--resume`, which this run did not pay for) and earlier findings fixed or dismissed; findings confirmed, uncertain or unchecked; and earlier findings fixed or dismissed in all (counted for the recorded reviewer; one recorded before reviewers were counts only if this review still has its fingerprint). Unless your account shares findings, no path, title, fingerprint, finding text or code is sent.
 
 - The repository is a salted SHA-256 of its normalized address `https://host/owner/repo` (user, credentials, port, trailing `/` and `.git` dropped, case folded, so `git@host:owner/repo.git` and `ssh://git@host:22/owner/repo` match). With `--pr` or `--mr` it is the platform's repository; locally, origin's (a path remote as written; no origin, the directory). The server can group a repository's reviews without learning which it is.
 - A remote in SSH form, or with a port or trailing `/`, got a new hash once after 0.5.0 (which hashed the URL as written): earlier reviews and memory match only once recorded again.
-- The salt is random, in `upload-salt` next to the credentials, so each machine hashes differently. If your account shares findings, the salt is the account's, read at login and before each review and kept in `account-salt` (readable only by you), so all your machines agree.
+- The salt is random, in `upload-salt` next to the credentials, so each machine hashes differently. If your account shares findings, the salt is the account's, read at login and before each review and kept in `account-salt` (readable only by you), so all your machines agree. When a review needs this machine's salt but cannot read `upload-salt` (another user's, say, after `sudo ocra`), it leaves the file as it is, warns, and sends nothing to ocra Cloud.
 - `--no-upload` skips one upload, `OCRA_CLOUD=off` turns ocra Cloud off, and a failed upload is only a warning.
 
 **Sharing findings.** With "Send findings and the code they quote to ocra Cloud" on in your account's Settings (off by default), the upload also carries each finding's fingerprint, reviewer, severity, category, verification, file, line range, title, body, suggestion and quoted code, so the web can show the full review.
 
-- Before sending, ocra replaces secret-looking tokens in the path, category, title, body, suggestion and code with `[redacted]` and marks the finding redacted: PEM private key blocks, AWS key ids (`AKIA…`, `ASIA…`), GitHub tokens (`ghp_`, `gho_`, `ghs_`, `ghu_`, `ghr_`, `github_pat_`), GitLab tokens (`glpat-`), `sk-` keys (`sk-ant-`, `sk-or-`, `sk-proj-` too), Slack tokens (`xoxb-` and the like), Google API keys (`AIza…`), npm tokens (`npm_…`), Slack and Discord webhook URLs, a URL's password (`postgres://user:…@`), a quoted value assigned to a name such as `password`, `secret`, `token` or `api_key`, hex runs of 32+ characters, and random-looking base64 runs of 32+ characters containing a digit (paths are left alone). It catches patterns, not every secret; the server runs the same pass again.
-- At most 200 findings and 256 KB of text, each field cut at 4 KB (marked truncated). The terminal prints `Sent this review's counts and N finding(s) to ocra Cloud`.
+- Before sending, ocra replaces secret-looking tokens in the path, category, title, body, suggestion and code with `[redacted]` and marks the finding redacted: PEM and PGP private key blocks, AWS key ids (`AKIA…`, `ASIA…`), GitHub tokens (`ghp_`, `gho_`, `ghs_`, `ghu_`, `ghr_`, `github_pat_`), GitLab tokens (`glpat-`), `sk-` keys (`sk-ant-`, `sk-or-`, `sk-proj-` too), Slack tokens (`xoxb-` and the like), Google API keys (`AIza…`), npm tokens (`npm_…`), Slack and Discord webhook URLs, a URL's password (`postgres://user:…@`), the password of `curl -u user:…` or `--user user:…`, the credential after `Bearer` or `Basic` (a plain word after them, as in prose, stays), and a value assigned to a name such as `password`, `passphrase`, `secret`, `secret_key`, `token` or `api_key`: quoted (`password = "…"`), or unquoted as `NAME=…` (`.env`, a flag, a query string) or at the end of a line (`password: …` in YAML). An unquoted value of letters only (`changeme`, `string`), or one that reads as code (a call, a dotted name such as `process.env.TOKEN`, `${…}`, a line ending in `,` or `;`), is left alone. Also hex runs of 32+ characters (after a prefix such as `dop_v1_` too), and random-looking base64 runs of 32+ characters containing a digit (paths are left alone). It catches patterns, not every secret; the server runs the same pass again.
+- At most 200 findings and 256 KB of text, each field cut at 4 KB before it is redacted (marked truncated; a token the cut falls in is redacted whole). The terminal prints `Sent this review's counts and N finding(s) to ocra Cloud`.
 - Findings go only when the server returns the account's salt, which it does only while the switch is on. If ocra Cloud is unreachable before the review, the review warns, hashes with the salt in `account-salt` (or this machine's), sends no findings and skips the account's memory.
 - `--no-upload` and `OCRA_CLOUD=off` still send nothing.
 

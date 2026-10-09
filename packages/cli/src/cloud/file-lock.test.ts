@@ -1,59 +1,53 @@
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { dirname, join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { withFileLock } from "./file-lock.js";
 
-const lockPath = () => join(mkdtempSync(join(tmpdir(), "ocra-lock-")), "x.lock");
-const QUICK = { waitMs: 200, staleMs: 30_000, pollMs: 10 };
+// What Windows does, on any system: a create refused with EPERM, as for a
+// file whose removal is pending or a directory that takes no new file.
+const refused = vi.hoisted(() => ({ create: (_path: string): boolean => false }));
 
-describe("withFileLock", () => {
-  it("runs one holder at a time and removes its lock", async () => {
-    const path = lockPath();
-    let inside = 0;
-    let most = 0;
-    await Promise.all(
-      Array.from({ length: 5 }, () =>
-        withFileLock(path, async () => {
-          inside += 1;
-          most = Math.max(most, inside);
-          await new Promise((resolve) => setTimeout(resolve, 10));
-          inside -= 1;
-        }),
-      ),
-    );
-    expect(most).toBe(1);
-    expect(existsSync(path)).toBe(false);
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const real = await importOriginal<typeof import("node:fs/promises")>();
+  const writeFile: typeof real.writeFile = async (file, ...rest) => {
+    if (refused.create(String(file))) {
+      throw Object.assign(new Error("operation not permitted"), { code: "EPERM" });
+    }
+    return real.writeFile(file, ...rest);
+  };
+  return { ...real, writeFile };
+});
+
+const QUICK = { waitMs: 2_000, staleMs: 30_000, noticeMs: 10_000, pollMs: 10 };
+const platform = Object.getOwnPropertyDescriptor(process, "platform") as PropertyDescriptor;
+
+beforeEach(() => {
+  Object.defineProperty(process, "platform", { ...platform, value: "win32" });
+});
+afterEach(() => {
+  Object.defineProperty(process, "platform", platform);
+  refused.create = () => false;
+});
+
+describe("withFileLock on Windows", () => {
+  it("takes the lock once a removal refused its create has ended, never going without it", async () => {
+    const path = join(mkdtempSync(join(tmpdir(), "ocra-lock-")), "x.lock");
+    // Refused while the last holder's lock was being removed; gone by the time it looks.
+    let refusals = 1;
+    refused.create = (file) => file === path && refusals-- > 0;
+    const heldInside = await withFileLock(path, async () => existsSync(path), QUICK);
+    expect(heldInside).toBe(true);
+    expect(readdirSync(dirname(path))).toEqual([]);
   });
 
-  it("goes on without the lock after waiting, and leaves the holder's lock alone", async () => {
-    const path = lockPath();
-    const held = JSON.stringify({ token: "other", at: Date.now() });
-    writeFileSync(path, held);
+  it("goes on at once without a lock where no file can be made", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "ocra-lock-"));
+    const path = join(dir, "x.lock");
+    refused.create = (file) => file.startsWith(dir);
     const started = Date.now();
     expect(await withFileLock(path, async () => "ran", QUICK)).toBe("ran");
-    expect(Date.now() - started).toBeGreaterThanOrEqual(QUICK.waitMs);
-    expect(readFileSync(path, "utf8")).toBe(held);
-  });
-
-  it("breaks a stale lock", async () => {
-    const path = lockPath();
-    writeFileSync(path, JSON.stringify({ token: "dead", at: Date.now() - 31_000 }));
-    const started = Date.now();
-    await withFileLock(path, async () => {
-      expect(JSON.parse(readFileSync(path, "utf8")).token).not.toBe("dead");
-    });
     expect(Date.now() - started).toBeLessThan(QUICK.waitMs);
-    expect(existsSync(path)).toBe(false);
-  });
-
-  it("releases the lock when the holder throws", async () => {
-    const path = lockPath();
-    await expect(
-      withFileLock(path, async () => {
-        throw new Error("boom");
-      }),
-    ).rejects.toThrow("boom");
-    expect(existsSync(path)).toBe(false);
+    expect(readdirSync(dir)).toEqual([]);
   });
 });

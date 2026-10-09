@@ -28,7 +28,7 @@ jobs:
       - run: npm run typecheck
       # The public API of each package against its report in etc/.
       - run: npm run check:api
-      # Unused files, exports and dependencies (knip.json).
+      # Unused files, exports and dependencies (knip.jsonc).
       - run: npm run knip
       # Coverage is reported, not gated.
       - run: npm run test:coverage
@@ -52,6 +52,23 @@ jobs:
       - run: node --version
       - run: npm run build
       - run: npm test
+
+  # What depends on the operating system, on the others users run ocra on
+  # (Linux runs every test above): the ocra Cloud credentials' lock and
+  # private files, and the local git adapter (case-folding file systems,
+  # paths, child processes).
+  platforms:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+      - run: npx vitest run packages/cli/src/cloud packages/cli/src/commands/login packages/cli/src/session packages/vcs-local
 
   # actionlint (with shellcheck, preinstalled on the runner) and zizmor's
   # offline audits of the workflows, action.yml and dependabot.yml, both at

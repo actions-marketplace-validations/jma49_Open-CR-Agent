@@ -1,7 +1,7 @@
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Credentials } from "./credentials.js";
 import type { CloudDeps } from "./deps.js";
 import { GatewayToken, RENEW_BEFORE_MS } from "./gateway-token.js";
@@ -10,6 +10,7 @@ const SERVER = "https://cloud.test";
 const tokens: GatewayToken[] = [];
 afterEach(() => {
   for (const token of tokens.splice(0)) token.stop();
+  vi.useRealTimers();
 });
 
 // A saved session whose token is due for renewal in `dueInMs`.
@@ -47,8 +48,21 @@ function machine(refresh: () => Response, dueInMs: number) {
   return { token, warnings, refreshes: () => refreshes };
 }
 
+// How long a test waits for a renewal, in real time: renewing reads and
+// writes files, which a busy CI runner can hold up for long.
+const PATIENCE_MS = 15_000;
+
+/**
+ * Waits until `done`, a turn of the event loop at a time. The turns are
+ * immediates, which a test's fake timers leave alone; the deadline is the
+ * real clock's, which they leave alone too.
+ */
 async function until(done: () => boolean): Promise<void> {
-  for (let i = 0; i < 200 && !done(); i += 1) await new Promise((r) => setTimeout(r, 10));
+  const deadline = performance.now() + PATIENCE_MS;
+  while (!done()) {
+    if (performance.now() > deadline) throw new Error("gave up waiting for the renewal");
+    await new Promise((r) => setImmediate(r));
+  }
 }
 
 describe("the gateway token during a run", () => {
@@ -83,5 +97,28 @@ describe("the gateway token during a run", () => {
     stopped.token.stop();
     await new Promise((r) => setTimeout(r, 80));
     expect(stopped.refreshes()).toBe(0);
+  });
+
+  it("keeps trying past its expiry, so the run gets a token once ocra Cloud answers again", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const answers = [503, 503, 503, 200];
+    const m = machine(() => {
+      const status = answers.shift() ?? 200;
+      return status === 200
+        ? Response.json({
+            access_token: "ocra_cli_next",
+            refresh_token: "ocra_ref_2",
+            expires_in: 3600,
+          })
+        : new Response("{}", { status });
+    }, -RENEW_BEFORE_MS - 1_000);
+    m.token.start();
+    for (let attempt = 1; attempt <= 4; attempt += 1) {
+      await vi.advanceTimersByTimeAsync(RENEW_BEFORE_MS);
+      await until(() => m.refreshes() === attempt && vi.getTimerCount() === 1);
+    }
+    await until(() => m.token.value !== "ocra_cli_first");
+    expect(m.token.value).toBe("ocra_cli_next");
+    expect(m.warnings).toHaveLength(1);
   });
 });

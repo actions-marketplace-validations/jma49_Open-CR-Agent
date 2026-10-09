@@ -6,6 +6,7 @@ import type {
   Finding,
   PriorFinding,
   RiskTier,
+  TaskFinding,
   Verdict,
 } from "../domain.js";
 import type { JudgeDecisions } from "../judge/judge.js";
@@ -75,6 +76,9 @@ export interface TaskOutcome {
   // What the task spent, its share of a plan call included; a finding's
   // cost is its task's.
   usage: Usage;
+  // The earlier run this task's result was taken from (--resume): its usage
+  // is what that run paid, and this run paid nothing for it.
+  reusedFrom?: string;
 }
 
 export interface ReviewReport {
@@ -122,7 +126,15 @@ export interface ReviewReport {
 export type ReviewEvent =
   | { type: "run_started"; runId: string; changeRequest: ChangeRequest }
   | { type: "files_selected"; selected: number; excluded: number; tier: RiskTier }
-  | { type: "files_bundled"; strategy: string; bundles: number; warnings: string[] }
+  // groups: each bundle's files, so a run resumed after this one was killed
+  // keeps its bundles (ADR-0031).
+  | {
+      type: "files_bundled";
+      strategy: string;
+      bundles: number;
+      groups: { label: string; files: string[] }[];
+      warnings: string[];
+    }
   | { type: "matrix_planned"; tasks: number; skipped: SkippedCell[] }
   | { type: "task_started"; taskId: string; reviewer: string; bundle: string; files: string[] }
   // attempt: what a finished attempt read, searched for and answered.
@@ -137,6 +149,9 @@ export type ReviewEvent =
       file: string;
       title: string;
     }
+  // A completed task's findings as reported, before anchoring, under the key
+  // of its inputs, so a later run can reuse them (--resume, ADR-0031).
+  | { type: "task_reported"; taskId: string; key: string; findings: TaskFinding[] }
   | { type: "task_finished"; outcome: TaskOutcome }
   | { type: "verification_finished"; checked: number; refuted: RefutedFinding[] }
   | { type: "judge_finished"; verdict: Verdict; judgement?: JudgeDecisions }
