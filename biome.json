@@ -8,7 +8,9 @@
       "!**/*.tsbuildinfo",
       "!evals/golden/*.json",
       "!docs/schema/*.json",
-      "!**/__snapshots__"
+      "!docs/images/*.svg",
+      "!**/__snapshots__",
+      "!packages/runtime-direct/src/recordings"
     ]
   },
   "formatter": {

@@ -1,4 +1,5 @@
 import { formatValue } from "./compare.js";
+import { countFunnel, FUNNEL_STAGES, type Funnel } from "./funnel.js";
 import type { GoldenCaseScore } from "./golden-score.js";
 
 // Many golden runs over time, grouped by series: how much the same setup
@@ -41,6 +42,7 @@ interface Scored {
   recall?: number;
   precision?: number;
   wrapUps: WrapUps;
+  funnel: Funnel;
 }
 
 interface SeriesTrend {
@@ -58,7 +60,17 @@ export interface Trend {
   series: SeriesTrend[];
   // Every series again, on the cases common to all of them.
   across?: { common: string[]; rows: { name: string; scored: Scored[] }[] };
-  claims: { id: string; concern: string; hits: Record<string, { hits: number; runs: number }> }[];
+  claims: {
+    id: string;
+    concern: string;
+    hits: Record<string, { hits: number; runs: number }>;
+    // Over every scored run of every series: a claim found always or never
+    // tells two setups apart less than one found about half the time.
+    stability: { hits: number; runs: number };
+    // By series: how far the runs that missed it got (the funnel stage;
+    // underrated: reported below its minimum severity).
+    misses: Record<string, Record<string, number>>;
+  }[];
   warnings: string[];
 }
 
@@ -166,6 +178,7 @@ function score(run: TrendRun & { cases: Record<string, GoldenCaseScore> }, ids: 
       turns: ids.reduce((t, id) => t + (run.wrapUps[id]?.turns ?? 0), 0),
       findings: ids.reduce((t, id) => t + (run.wrapUps[id]?.findings ?? 0), 0),
     },
+    funnel: countFunnel(ids.flatMap((id) => run.cases[id]?.claims ?? [])),
   };
   if (expected > 0) scored.recall = sum((c) => c.found) / expected;
   if (reported > 0) scored.precision = sum((c) => c.right) / reported;
@@ -195,15 +208,24 @@ function claims(series: readonly SeriesTrend[], common: readonly string[]): Tren
     const sample = series.flatMap((s) => s.runs.filter(hasCases))[0]?.cases?.[id];
     for (const [k, claim] of (sample?.claims ?? []).entries()) {
       const hits: Trend["claims"][number]["hits"] = {};
+      const stability = { hits: 0, runs: 0 };
+      const misses: Trend["claims"][number]["misses"] = {};
       for (const s of series) {
         const runs = s.runs.filter(hasCases);
         if (runs.length === 0) continue;
-        hits[s.name] = {
-          hits: runs.filter((r) => r.cases[id]?.claims[k]?.found === true).length,
-          runs: runs.length,
-        };
+        const outcomes = runs.map((r) => r.cases[id]?.claims[k]);
+        const found = outcomes.filter((c) => c?.found === true).length;
+        hits[s.name] = { hits: found, runs: runs.length };
+        stability.hits += found;
+        stability.runs += runs.length;
+        const missed: Record<string, number> = {};
+        for (const c of outcomes.filter((c) => c?.found !== true)) {
+          const stage = c?.stage === "found" ? "underrated" : (c?.stage ?? "unknown");
+          missed[stage] = (missed[stage] ?? 0) + 1;
+        }
+        misses[s.name] = missed;
       }
-      rows.push({ id: `${id}#${k + 1}`, concern: claim.concern, hits });
+      rows.push({ id: `${id}#${k + 1}`, concern: claim.concern, hits, stability, misses });
     }
   }
   return rows;
@@ -229,12 +251,12 @@ export function renderTrend(trend: Trend): string {
         ? `${s.runs.length} run(s), none with per-case scores.`
         : `${s.runs.length} run(s); compared on ${s.common.length} case(s) every scored run reviewed${only.length > 0 ? ` (left out, reviewed by only some: ${only.join(", ")})` : ""}.`,
       "",
-      "| Run | Commit | Cases | Golden recall | Golden precision | Wrap-up turns | Wrap-up findings | All its cases (recall, precision) |",
-      "|---|---|---|---|---|---|---|---|",
+      "| Run | Commit | Cases | Golden recall | Golden precision | Wrap-up turns | Wrap-up findings | Funnel (not looked/looked/raised/dropped/found) | All its cases (recall, precision) |",
+      "|---|---|---|---|---|---|---|---|---|",
       ...s.runs.map((r) => {
         const sc = "scored" in r ? r.scored : undefined;
         const cases = Object.keys(r.cases ?? {}).length;
-        return `| ${r.runId} | ${r.commit?.slice(0, 12) ?? "–"} | ${cases} | ${pct(sc?.recall)} | ${pct(sc?.precision)} | ${sc ? sc.wrapUps.turns : "–"} | ${sc ? sc.wrapUps.findings : "–"} | ${pct(r.overall.recall)}, ${pct(r.overall.precision)} |`;
+        return `| ${r.runId} | ${r.commit?.slice(0, 12) ?? "–"} | ${cases} | ${pct(sc?.recall)} | ${pct(sc?.precision)} | ${sc ? sc.wrapUps.turns : "–"} | ${sc ? sc.wrapUps.findings : "–"} | ${sc ? funnelCell(sc.funnel) : "–"} | ${pct(r.overall.recall)}, ${pct(r.overall.precision)} |`;
       }),
       "",
       `- Golden recall: ${spread(s.recall)}`,
@@ -270,14 +292,16 @@ export function renderTrend(trend: Trend): string {
     lines.push(
       "## Claims: runs that found each expected finding",
       "",
-      `| Claim | Concern | ${names.join(" | ")} |`,
-      `|---|---|${names.map(() => "---|").join("")}`,
+      "Stability is the share of all these runs that found it.",
+      "",
+      `| Claim | Concern | ${names.join(" | ")} | Stability |`,
+      `|---|---|${names.map(() => "---|").join("")}---|`,
       ...trend.claims.map((c) => {
         const cells = names.map((n) => {
           const h = c.hits[n];
-          return h ? `${h.hits}/${h.runs}` : "–";
+          return h ? `${h.hits}/${h.runs}${missesOf(c.misses[n] ?? {})}` : "–";
         });
-        return `| ${c.id} | ${short(c.concern)} | ${cells.join(" | ")} |`;
+        return `| ${c.id} | ${concernCell(c.concern)} | ${cells.join(" | ")} | ${pct(c.stability.hits / c.stability.runs)} |`;
       }),
       "",
     );
@@ -286,13 +310,29 @@ export function renderTrend(trend: Trend): string {
   return `${lines.join("\n")}\n`;
 }
 
+// Unknown alone when no review of the run kept a session log.
+function funnelCell(funnel: Funnel): string {
+  const known = FUNNEL_STAGES.map((stage) => funnel[stage]);
+  if (known.every((n) => n === 0)) return funnel.unknown > 0 ? "unknown" : "–";
+  return `${known.join("/")}${funnel.unknown > 0 ? `, ${funnel.unknown} unknown` : ""}`;
+}
+
+const MISS_ORDER = ["not-looked", "looked", "raised", "dropped", "underrated", "unknown"];
+
+// Nothing when no run that missed it kept a session log.
+function missesOf(misses: Record<string, number>): string {
+  if (Object.keys(misses).every((stage) => stage === "unknown")) return "";
+  const parts = MISS_ORDER.flatMap((stage) => (misses[stage] ? [`${stage} ${misses[stage]}`] : []));
+  return parts.length > 0 ? ` (${parts.join(", ")})` : "";
+}
+
 function judges(s: SeriesTrend): string[] {
   const all = [...new Set(s.runs.flatMap((r) => (r.judge ? [r.judge] : [])))];
   return all.length > 0 ? [`- Judge: ${all.join("; ")}`] : [];
 }
 
 // Concerns are case text: one line, bounded, and no table breaks.
-function short(text: string): string {
+export function concernCell(text: string): string {
   const line = text.replace(/\s+/g, " ").replaceAll("|", "\\|").trim();
   return line.length > 80 ? `${line.slice(0, 77)}...` : line;
 }
