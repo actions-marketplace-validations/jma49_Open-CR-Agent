@@ -13,6 +13,7 @@ import { scratchRepos } from "@open-cr-agent/test-support";
 import { afterAll, describe, expect, it } from "vitest";
 import { originRepository } from "../repository-id.js";
 import { accountSaltPath } from "./account-salt.js";
+import { endlessMemory } from "./client.fakes.js";
 import type { CloudDeps } from "./deps.js";
 import { parseAccountMemory } from "./memory.js";
 import { prepareCloudReview } from "./review.js";
@@ -38,10 +39,18 @@ const repos = scratchRepos("ocra-cr-repo-");
 afterAll(repos.removeAll);
 const repo = (origin = "https://github.com/org/repo") => repos.create({ origin }).dir;
 
-function machine(routes: Record<string, () => Response>) {
+// Named in the manual; `ocra login` writes it, with the user present, while
+// the account shares findings.
+const sharingConsentPath = (credentialsPath: string) =>
+  join(dirname(credentialsPath), "share-findings");
+
+// A machine signed in with `ocra login`, which recorded its consent to send
+// findings unless `consent` is false.
+function machine(routes: Record<string, () => Response>, { consent = true } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "ocra-cr-"));
   const credentialsPath = join(dir, "ocra", "credentials.json");
   mkdirSync(join(dir, "ocra"));
+  if (consent) writeFileSync(sharingConsentPath(credentialsPath), "on\n");
   writeFileSync(
     credentialsPath,
     JSON.stringify({
@@ -118,6 +127,33 @@ describe("prepareCloudReview", () => {
     }
   });
 
+  it("shares no findings, and says so, when the account shares them but this machine never agreed", async () => {
+    const root = repo();
+    const m = machine(sharing, { consent: false });
+    const warnings: string[] = [];
+    const ready = await prepareCloudReview(root, m.deps, (w) => warnings.push(w));
+    expect(ready).toMatchObject({
+      repoHash: await hashOf(root, m.credentialsPath, SALT),
+      shareFindings: false,
+    });
+    expect(warnings).toEqual([
+      "your ocra Cloud account shares findings, but this machine has not agreed to send them since it signed in; this review sends counts only (run ocra login to send findings from this machine)",
+    ]);
+  });
+
+  it("forgets this machine's consent once the account stops sharing, so turning it on again needs a login", async () => {
+    const root = repo();
+    const m = machine({ ...sharing, "/api/account/salt": () => Response.json({ salt: null }) });
+    expect((await prepareCloudReview(root, m.deps, () => {}))?.shareFindings).toBe(false);
+    expect(existsSync(sharingConsentPath(m.credentialsPath))).toBe(false);
+    m.deps.fetch = machine(sharing).deps.fetch;
+    const warnings: string[] = [];
+    expect((await prepareCloudReview(root, m.deps, (w) => warnings.push(w)))?.shareFindings).toBe(
+      false,
+    );
+    expect(warnings).toEqual([expect.stringMatching(/has not agreed to send them/)]);
+  });
+
   it("says once that the account's memory does not apply while it does not share findings", async () => {
     const off = { ...sharing, "/api/account/salt": () => Response.json({ salt: null }) };
     const m = machine(off);
@@ -131,6 +167,18 @@ describe("prepareCloudReview", () => {
     const quiet: string[] = [];
     await prepareCloudReview(repo(), none.deps, (w) => quiet.push(w));
     expect(quiet).toEqual([]);
+  });
+
+  it("tells whether the account remembers findings without reading all of them", async () => {
+    const memory = endlessMemory(40);
+    const m = machine({
+      "/api/account/salt": () => Response.json({ salt: null }),
+      "/api/memory": memory.answer,
+    });
+    const warnings: string[] = [];
+    await prepareCloudReview(repo(), m.deps, (w) => warnings.push(w));
+    expect(warnings).toEqual([expect.stringMatching(/remembers findings/)]);
+    expect(memory.counter.read).toBeLessThan(1024 * 1024);
   });
 
   // Windows ignores the mode, and root reads the file anyway.
@@ -156,6 +204,61 @@ describe("prepareCloudReview", () => {
         expect(warnings).toEqual([
           expect.stringMatching(/cannot be read.*sends nothing to ocra Cloud/),
         ]);
+      }
+    },
+  );
+
+  // Windows ignores the mode, and root writes anyway.
+  it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+    "runs a signed-in review when the config directory cannot be written",
+    async () => {
+      const root = repo();
+      const unwritable = async (m: ReturnType<typeof machine>) => {
+        const dir = dirname(m.credentialsPath);
+        const warnings: string[] = [];
+        chmodSync(dir, 0o500);
+        try {
+          const ready = await prepareCloudReview(root, m.deps, (w) => warnings.push(w));
+          return { ready, warnings };
+        } finally {
+          chmodSync(dir, 0o700);
+        }
+      };
+      const notKept = /could not keep your ocra Cloud account's salt/;
+
+      // A sharing account: the answer's salt serves this review.
+      const shared = machine(sharing);
+      const kept = await unwritable(shared);
+      expect(kept.ready).toMatchObject({
+        repoHash: await hashOf(root, shared.credentialsPath, SALT),
+        shareFindings: true,
+      });
+      expect(kept.ready?.memory).toHaveLength(1);
+      expect(kept.warnings).toEqual([expect.stringMatching(notKept)]);
+
+      // An account that answers no salt: this machine's, while account-salt
+      // stays behind.
+      const off = machine(
+        { "/api/account/salt": () => Response.json({ salt: null }) },
+        { consent: false },
+      );
+      writeFileSync(join(dirname(off.credentialsPath), "upload-salt"), `${"6".repeat(64)}\n`);
+      writeFileSync(accountSaltPath(off.credentialsPath), `${SALT}\n`);
+      const stale = await unwritable(off);
+      expect(stale.ready).toMatchObject({
+        repoHash: await hashOf(root, off.credentialsPath),
+        shareFindings: false,
+      });
+      expect(stale.warnings).toEqual([expect.stringMatching(notKept)]);
+
+      // No salt to hash with: nothing goes to ocra Cloud.
+      for (const answer of [
+        () => Response.json({ salt: null }),
+        () => new Response("", { status: 500 }),
+      ]) {
+        const none = await unwritable(machine({ "/api/account/salt": answer }));
+        expect(none.ready).toBeUndefined();
+        expect(none.warnings.at(-1)).toMatch(/cannot be made.*sends nothing to ocra Cloud/);
       }
     },
   );

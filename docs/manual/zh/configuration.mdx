@@ -82,7 +82,7 @@ export OCRA_MODEL_TOP="google/gemini-3.1-pro-preview"
 
 - **`direct`** 发送 `reasoning_effort`；对声明了 `"effort": "openrouter"` 的供应商发送 `reasoning: { effort }`（见[模型供应商](./providers#你自己的端点)）；`none` 按 `none` 发送。带其他级别的调用不发送 `temperature` 和 `seed`，推理模型会拒绝或忽略它们。端点返回 HTTP 400 并点名该参数时，去掉它重试一次（不算失败），这个模型之后的调用都不再带它，并给出警告。
 - **`opencode`** 把级别写进模型的供应商参数：OpenAI 推理模型（GPT-5、o 系列）用 `reasoningEffort`，Claude 4 及以后和 Gemini 2.5 用思考预算（thinking budget），Gemini 3 用 `thinkingLevel`；OpenRouter 模型和[声明的供应商](./providers#你自己的端点)按各自的 `effort` 接收。思考预算取 OpenCode 目录中该模型输出上限的一定比例（`minimal` 1/32、`low` 1/16、`medium` 1/4、`high` 1/2；Claude 至少 1,024 个 token，Gemini 不超出它自己的范围），没有上限时按 32,000 个 token 计算；`none` 关闭思考（Claude 不思考，Gemini 2.5 Flash 预算为 0）。每个模型的每个级别是独立的 OpenCode variant，共用一个模型的 agent 可以用不同级别。和 `direct` 一样，`none` 以外的级别不带配置的 `temperature`。其他供应商（Azure、Bedrock、Groq 等）不发送推理强度。
-- 模型接受哪些级别来自 ocra 内置的一张表（`@open-cr-agent/core` 的 `effortCapability`），可能跟不上新模型：在 `opencode` 上，表里没为某模型列出的级别（例如 o3 的 `minimal`、Gemini 3 的 `medium`）或不认识的模型不带推理强度，每个 agent 警告一次。审查不会因此失败。
+- 模型接受哪些级别来自 ocra 内置的一张表（`@open-cr-agent/core` 的 `effortCapability`），可能跟不上新模型：在 `opencode` 上，表里没为某模型列出的级别（例如 o3 的 `minimal`、Gemini 3 的 `medium`）或不认识的模型不带推理强度，每个 agent 警告一次。审查不会因此失败。启动时读不到 OpenCode 的模型目录时，不发送任何级别，警告里会给出原因。
 - JSON 报告的 `provenance.agents` 列出每个 agent 的层级、推理强度、`applied` 和 `notApplied`；`--plan` 显示每个任务的推理强度；配置哈希也覆盖它。
 
 ## 供应商 key
@@ -110,7 +110,7 @@ agent 运行时只拿到 `PATH`、`HOME`、语言区域、代理和 CA 设置，
 
 ## 文件选择
 
-ocra 会跳过：二进制文件、疑似密钥文件（`.env`、私钥、证书、云服务和镜像仓库凭据、Terraform 变量和状态文件）、已删除的文件、媒体和压缩包、锁文件、第三方和生成的代码，以及过大的 diff。超过 1 MB 的文件按二进制处理并跳过。数据库迁移文件从不被当作生成代码。
+ocra 会跳过：二进制文件、疑似密钥文件（`.env`、私钥、证书、云服务和镜像仓库凭据、Terraform 变量和状态文件）、已删除的文件、媒体和压缩包、锁文件、第三方和生成的代码，以及过大的 diff。超过 1 MB 的文件按二进制处理并跳过。名字看起来是文本（`.ts`、`.py` 等）却按二进制跳过的文件会给出警告。审查提交区间、单个提交和 PR 时，`.gitattributes` 从 base 提交读取（git 2.41 及以上），被审查的改动无法把自己的文件标成二进制。数据库迁移文件从不被当作生成代码。
 
 - `exclude`：额外要跳过的 glob。
 - `include`：即使会被当作生成代码或按扩展名跳过，也要审查的 glob。密钥文件永远无法被 include。
@@ -145,7 +145,8 @@ ocra 会跳过：二进制文件、疑似密钥文件（`.env`、私钥、证书
 |---|---|
 | `runtime`（`opencode` 或 `direct`）、`models.<tier>`、`effort.<tier>`、`reviewers.<id>`、`roles.<role>` | 只补充配置没有写的部分；配置中某个审查员或角色的条目整体优先 |
 | `concurrency`、`taskTimeoutMinutes`、`runTimeoutMinutes`、`maxCostUsd`、`maxTasks`、`verify`、`judge`、`sampling` | 只在配置没有设置时生效（`sampling` 算一个整体）：账户可以给没有上限的运行加上限，但不能放宽限制 |
-| `include`、`exclude` | 合并：先是配置中的模式，再是账户的 |
+| `include` | 合并：先是配置中的模式，再是账户的 |
+| `exclude` | 只在配置没有设置时生效：账户排除的文件既不审查，也不算作未审查，所以配置里写了 `exclude`（哪怕是 `[]`）就不再采用账户的 |
 | `rules` | 追加在仓库规则和共享规则之后：最多 50 条，格式与 [`.ocra/rules.json`](./rules) 的条目相同，每条规则最多 2,000 个字符，以同样的方式嵌入提示词 |
 
 每个键都按本文件的 schema 校验；不符合的、或当前版本不认识的键会被忽略，并给出点名它的警告，其余照常生效。模型必须是 `ocra-<provider>/<model>`，经由 ocra Cloud 使用其中保存的 key。账户永远不能设置 `providers`、`extends`、`github`（`botLogin` 决定信任谁的评论）或插件：ocra 会忽略并给出警告。

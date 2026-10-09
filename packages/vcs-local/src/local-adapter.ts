@@ -1,16 +1,6 @@
-import {
-  cp,
-  lstat,
-  mkdtemp,
-  open,
-  readdir,
-  readFile,
-  readlink,
-  realpath,
-  rm,
-} from "node:fs/promises";
+import { cp, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import {
   type ChangeRequest,
   type CodeMatch,
@@ -19,8 +9,9 @@ import {
   type PriorReview,
   type VcsAdapter,
 } from "@open-cr-agent/core";
-import { errnoCode, isNotFound, parseUnifiedDiff } from "@open-cr-agent/core/internal";
-import { GitError, git, isShallow, SHALLOW_HINT } from "./git.js";
+import { isNotFound, parseUnifiedDiff } from "@open-cr-agent/core/internal";
+import { attributesFrom, GitError, git, isShallow, SHALLOW_HINT } from "./git.js";
+import { MAX_READ_BYTES, WorkingTree } from "./working-tree.js";
 
 export type LocalTarget =
   | { mode: "workspace" }
@@ -42,9 +33,6 @@ interface ResolvedTarget {
 const WORKING_TREE = "working-tree";
 const SEARCH_RESULT_LIMIT = 100;
 const SEARCH_OUTPUT_BYTES = 4 * 1024 * 1024;
-// A run keeps every file it reads in memory; files beyond this are read in
-// part (larger ones are diffed as binary and not reviewed anyway).
-export const MAX_READ_BYTES = 2 * 1024 * 1024;
 
 // Explicit prefixes and flags keep the output parseable whatever the user's
 // diff configuration (noprefix, mnemonicPrefix, external drivers, relative).
@@ -68,6 +56,7 @@ const DIFF_ARGS = [
 export class LocalGitAdapter implements VcsAdapter {
   readonly name = "local";
   private resolved: Promise<ResolvedTarget> | undefined;
+  private workingTree: WorkingTree | undefined;
 
   private readonly options: LocalGitOptions;
 
@@ -86,7 +75,10 @@ export class LocalGitAdapter implements VcsAdapter {
   async getDiff(): Promise<FileDiff[]> {
     const { root, base, head } = await this.target();
     if (head !== undefined) {
-      return parseUnifiedDiff(await git([...DIFF_ARGS, base, head, "--"], { cwd: root }));
+      const attributes = await attributesFrom(root, base);
+      return parseUnifiedDiff(
+        await git([...attributes, ...DIFF_ARGS, base, head, "--"], { cwd: root }),
+      );
     }
     return parseUnifiedDiff(await workspaceDiff(root, base));
   }
@@ -96,7 +88,10 @@ export class LocalGitAdapter implements VcsAdapter {
     const inside = relativeInside(root, resolve(root, path));
     if (inside === undefined) return undefined;
 
-    if (head === undefined) return readWorkingTreeFile(root, inside);
+    if (head === undefined) {
+      this.workingTree ??= new WorkingTree(root);
+      return this.workingTree.read(inside);
+    }
 
     try {
       return await git(["cat-file", "blob", `${head}:${inside.split(sep).join("/")}`], {
@@ -110,8 +105,20 @@ export class LocalGitAdapter implements VcsAdapter {
   }
 
   async searchCode(literal: string): Promise<CodeMatch[]> {
-    const { root, head } = await this.target();
-    const args = ["grep", "-n", "-z", "-I", "--no-color", "--full-name", "-F", "-m", "20"];
+    const { root, base, head } = await this.target();
+    const attributes = head === undefined ? [] : await attributesFrom(root, base);
+    const args = [
+      ...attributes,
+      "grep",
+      "-n",
+      "-z",
+      "-I",
+      "--no-color",
+      "--full-name",
+      "-F",
+      "-m",
+      "20",
+    ];
     if (head === undefined) args.push("--untracked");
     args.push("-e", literal);
     if (head !== undefined) args.push(head);
@@ -244,47 +251,6 @@ function relativeInside(root: string, absolute: string): string | undefined {
     return undefined;
   }
   return inside;
-}
-
-// Reads what git would store, as range and commit mode do: a symlink reads as
-// its target path, a path through a symlinked directory does not exist, and
-// neither does another spelling of a file's name. Following links would let a
-// committed `notes.txt -> .env` read a file the core access policy refuses by
-// name; so would a spelling that a case-insensitive file system folds to it.
-async function readWorkingTreeFile(root: string, inside: string): Promise<string | undefined> {
-  try {
-    const parent = dirname(inside);
-    const realParent = await realpath(resolve(root, parent));
-    if (realParent !== resolve(await realpath(root), parent)) return undefined;
-    const name = basename(inside);
-    if (!(await isListed(realParent, name))) return undefined;
-    const path = join(realParent, name);
-    const stat = await lstat(path);
-    if (stat.isSymbolicLink()) return await readlink(path, "utf8");
-    if (!stat.isFile()) return undefined;
-    if (stat.size <= MAX_READ_BYTES) return await readFile(path, "utf8");
-    const handle = await open(path, "r");
-    try {
-      const buffer = Buffer.alloc(MAX_READ_BYTES);
-      const { bytesRead } = await handle.read(buffer, 0, MAX_READ_BYTES, 0);
-      return buffer.subarray(0, bytesRead).toString("utf8");
-    } finally {
-      await handle.close();
-    }
-  } catch (error) {
-    const code = errnoCode(error);
-    if (code === "ENOENT" || code === "ENOTDIR") return undefined;
-    throw error;
-  }
-}
-
-// Up to Unicode normalization: git on macOS reports names precomposed,
-// whatever their form on disk.
-async function isListed(dir: string, name: string): Promise<boolean> {
-  const entries = await readdir(dir);
-  if (entries.includes(name)) return true;
-  const wanted = name.normalize("NFC");
-  return entries.some((entry) => entry.normalize("NFC") === wanted);
 }
 
 function request(
