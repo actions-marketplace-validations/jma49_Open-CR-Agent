@@ -19,7 +19,7 @@ import {
   type CliConfig,
   ConfigError,
   type ResolvedConfig,
-  resolveConfig,
+  resolveRunConfig,
 } from "../../config/cli-config.js";
 import type { SettingsLayer } from "../../config/settings.js";
 import type { Output } from "../../io/output.js";
@@ -49,6 +49,9 @@ export interface ResolvedRun extends ResolvedConfig {
   // sealKey: this machine's, which seals the session (ADR-0031).
   session: RunSession;
   registry: PluginRegistry;
+  // Aborted by the first Ctrl-C of the review; the platform adapter's
+  // client, made before the review starts, already listens to it.
+  interrupt: AbortController;
   vcs: VcsAdapter;
   rules: SourcedRule[];
   overrides: ReviewerOverrides;
@@ -67,16 +70,24 @@ export async function resolveRun(
 ): Promise<ResolvedRun> {
   const root = await findRepositoryRoot(deps.cwd);
   const warn = (message: string) => io.err.write(`[ocra] Warning: ${forTerminal(message)}\n`);
+  const interrupt = new AbortController();
   const target = await resolveReviewTarget(args, {
     cwd: deps.cwd,
     root,
     env: deps.env,
     warn,
     ...(deps.fetch ? { fetch: deps.fetch } : {}),
+    signal: interrupt.signal,
   });
-  const account = await withAccount(target, deps.cloud, warn);
-  if (args.ultra) account.layers.push({ source: "flag", settings: { ultra: true } });
-  const resolved = resolveConfig(account.layers);
+  const account = await withAccount(deps.cloud, warn);
+  const resolved = resolveRunConfig(
+    {
+      target: target.layers,
+      ...(account.layer ? { account: account.layer } : {}),
+      ultra: args.ultra === true,
+    },
+    warn,
+  );
   const filled = filledByAccount(resolved.listed);
   if (filled.length > 0) {
     io.err.write(forTerminal(`[ocra] From your ocra Cloud settings: ${filled.join(", ")}\n`));
@@ -102,6 +113,7 @@ export async function resolveRun(
     ...(account.settings ? { accountSettings: account.settings } : {}),
     session,
     registry,
+    interrupt,
     vcs: target.createVcs(registry),
     rules: [
       ...registry.rules.map((rule): SourcedRule => ({ ...rule, source: "plugin" })),
@@ -118,28 +130,25 @@ export async function resolveRun(
 // The account's settings fill what the repository leaves out (ADR-0027);
 // unreachable, they cost a warning, so a plan still works offline.
 async function withAccount(
-  target: ReviewTarget,
   cloudDeps: CloudDeps | undefined,
   warn: (message: string) => void,
 ): Promise<{
-  layers: SettingsLayer[];
+  layer?: SettingsLayer;
   cloud?: CloudDeps;
   settings?: AccountVersion;
   plugins: AccountPlugins;
 }> {
-  const layers: SettingsLayer[] = [...target.layers];
   const none: AccountPlugins = { plugins: [], pluginSettings: {} };
-  if (!cloudDeps || !(await cloudEnabled(cloudDeps, warn))) return { layers, plugins: none };
+  if (!cloudDeps || !(await cloudEnabled(cloudDeps, warn))) return { plugins: none };
   const account = await fetchAccountSettings(cloudDeps, warn);
   if (account.kind !== "read") {
     // Said once here; the rest of the run leaves ocra Cloud alone.
     if (account.kind !== "signed-out") warn(sessionLostWarning(account));
-    return { layers, plugins: none };
+    return { plugins: none };
   }
-  if (!account.settings) return { layers, cloud: cloudDeps, plugins: account.plugins };
-  layers.push(accountLayer(account.settings));
+  if (!account.settings) return { cloud: cloudDeps, plugins: account.plugins };
   return {
-    layers,
+    layer: accountLayer(account.settings),
     cloud: cloudDeps,
     settings: { version: account.settings.version },
     plugins: account.plugins,

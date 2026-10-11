@@ -5,7 +5,7 @@
 export { AGENT_ROLES } from "./agent/settings.js";
 export { at } from "./at.js";
 export { parseUnifiedDiff } from "./diff/parse.js";
-export { severitySchema, verificationSchema } from "./domain.js";
+export { RISK_TIERS, severitySchema, verificationSchema } from "./domain.js";
 export { errnoCode, isNotFound } from "./errors.js";
 export { shortHash } from "./hash.js";
 export {
@@ -15,7 +15,6 @@ export {
   serializeMemory,
 } from "./memory/memory.js";
 export { reviewContext } from "./pipeline/context.js";
-export { RISK_TIERS } from "./pipeline/matrix.js";
 export { MAX_TIMER_MS, REVIEW_DEFAULTS } from "./pipeline/options.js";
 export {
   PLAN_VERSION,
@@ -26,6 +25,7 @@ export { previewReview, type ReviewPreview } from "./pipeline/preview.js";
 export { stableHash } from "./pipeline/provenance.js";
 export { newRunId } from "./pipeline/run-id.js";
 export { readReport } from "./report/read.js";
+export { unconfirmedCriticals } from "./report/report.js";
 export { isUnsafeCodePoint, serializeOutput } from "./report/serialize.js";
 export { reconcile } from "./rereview/reconcile.js";
 export { repoRuleSchema } from "./rules/repo-rules.js";

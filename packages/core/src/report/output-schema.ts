@@ -8,8 +8,8 @@ import {
   verdictSchema,
   verificationSchema,
 } from "../domain.js";
+import { skipReasonSchema } from "../matrix/matrix.js";
 import { memoryEntrySchema } from "../memory/memory.js";
-import { skipReasonSchema } from "../pipeline/matrix.js";
 import { exclusionReasonSchema } from "../select/select.js";
 import { taskStatusSchema } from "./report.js";
 
@@ -155,7 +155,7 @@ const anchoringSummarySchema = z.strictObject({
   relocationCalls: z.int().nonnegative(),
 });
 
-const scopeSchema = z.discriminatedUnion("mode", [
+export const scopeSchema = z.discriminatedUnion("mode", [
   z.strictObject({ mode: z.literal("incremental"), since: z.string() }),
   z.strictObject({ mode: z.literal("full"), reason: z.string() }),
 ]);

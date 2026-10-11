@@ -10,8 +10,8 @@ import type {
   Verdict,
 } from "../domain.js";
 import type { JudgeDecisions } from "../judge/judge.js";
+import type { SkippedCell } from "../matrix/matrix.js";
 import type { RememberedEntry } from "../memory/memory.js";
-import type { SkippedCell } from "../pipeline/matrix.js";
 import type { ExclusionReason } from "../select/select.js";
 import type { RefutedFinding } from "../verify/verify.js";
 import type { RunProvenance } from "./provenance.js";
@@ -56,6 +56,39 @@ export function coverageGaps(run: {
     run.coverage.some((c) => c.status === "reviewed" || c.status === "unchanged") ||
     run.tasks.some((t) => t.status === "completed");
   return { notReviewed, nothingReviewed: notReviewed > 0 && !reviewed, incomplete };
+}
+
+// An incomplete review: it left an unfinished file or a critical finding
+// Verify could not check, so its result must never be read as a pass. The
+// exit code (3), SARIF, the pull request summary, the ocra Cloud upload and
+// `ocra metrics` all read it from here.
+export function isIncompleteReview(run: {
+  coverage: readonly CoverageEntry[];
+  unverifiedCriticals: number;
+}): boolean {
+  return run.coverage.some(isUnfinished) || run.unverifiedCriticals > 0;
+}
+
+// A verdict that fails the run and requests changes: significant concerns
+// that no one entitled to has overridden for this head commit.
+export function isBlocking(run: {
+  verdict: Verdict;
+  changeRequest: Pick<ChangeRequest, "override">;
+}): boolean {
+  return run.verdict === "significant_concerns" && run.changeRequest.override === undefined;
+}
+
+// Critical findings that only cap the verdict at minor issues: none is
+// confirmed, so none blocks. Zero while a confirmed one blocks, and
+// low-confidence findings do not count toward the verdict at all.
+export function unconfirmedCriticals(run: {
+  verdict: Verdict;
+  findings: readonly Pick<Finding, "severity" | "verification" | "lowConfidence">[];
+}): number {
+  if (run.verdict === "significant_concerns") return 0;
+  return run.findings.filter(
+    (f) => f.severity === "critical" && f.verification !== "confirmed" && !f.lowConfidence,
+  ).length;
 }
 
 export const taskStatusSchema = z.enum(["completed", "failed", "timed_out", "cancelled"]);

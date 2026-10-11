@@ -4,7 +4,6 @@
 // (`npm run api`). What the other workspace packages need beyond this comes
 // from "@open-cr-agent/core/internal", which is not a contract.
 
-export { SpendLimitReached } from "./agent/budget.js";
 export type { ReviewerOverride, ReviewerOverrides } from "./agent/settings.js";
 export {
   type AgentRole,
@@ -13,6 +12,7 @@ export {
   type RoleSettings,
   type TierEfforts,
 } from "./agent/settings.js";
+export { SpendLimitReached } from "./agent/spend-limit.js";
 export { addUsage, emptyUsage } from "./agent/usage.js";
 export type {
   AgentEvent,
@@ -64,10 +64,10 @@ export {
   type OcraErrorCode,
 } from "./errors.js";
 export type { JudgeDecisions } from "./judge/judge.js";
+export type { SkippedCell, SkipReason } from "./matrix/matrix.js";
 export type { MemoryEntry, MemorySource, RememberedEntry } from "./memory/memory.js";
 export { type ProxyEnv, proxiedFetch } from "./net/proxied-fetch.js";
 export { AccessDeniedError } from "./pipeline/context.js";
-export type { SkippedCell, SkipReason } from "./pipeline/matrix.js";
 export type {
   ReviewLimits,
   ReviewMode,
@@ -114,6 +114,8 @@ export {
   type AnchoringSummary,
   type CoverageEntry,
   coverageGaps,
+  isBlocking,
+  isIncompleteReview,
   isUnfinished,
   type ReviewEvent,
   type ReviewReport,

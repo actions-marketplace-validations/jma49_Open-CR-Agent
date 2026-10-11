@@ -5,7 +5,6 @@ import { stillOpen } from "../rereview/reconcile.js";
 import { markUnchecked, type VerificationResult, verifyFindings } from "../verify/verify.js";
 import type { StageContext } from "./execute-stage.js";
 import type { FilterStage } from "./filter-stage.js";
-import { REVIEW_DEFAULTS } from "./options.js";
 
 export interface CheckStage {
   verification: VerificationResult;
@@ -32,9 +31,9 @@ export async function checkStage(
 
 async function verify(
   { reconciled }: FilterStage,
-  { options, plan, budget, signal, emit }: StageContext,
+  { options, settings, plan, spendLimit, signal, emit }: StageContext,
 ): Promise<VerificationResult> {
-  if (options.stages?.verify === false) {
+  if (!settings.verify) {
     return {
       checked: 0,
       kept: markUnchecked(reconciled.findings),
@@ -49,8 +48,8 @@ async function verify(
     diffs: plan.selected,
     context: plan.context,
     signal,
-    concurrency: options.limits?.concurrency ?? REVIEW_DEFAULTS.concurrency,
-    budget,
+    concurrency: settings.concurrency,
+    spendLimit,
     call: roleCall("verifier", options),
   });
   if (verification.checked > 0) {
@@ -66,10 +65,10 @@ async function verify(
 async function judge(
   verification: VerificationResult,
   { reconciled, nothingReviewed }: FilterStage,
-  { options, plan, budget, signal, emit }: StageContext,
+  { options, settings, plan, spendLimit, signal, emit }: StageContext,
 ): Promise<JudgeResult> {
-  const wanted = options.stages?.judge !== false && verification.kept.length > 0;
-  const affordable = !budget.exhausted();
+  const wanted = settings.judge && verification.kept.length > 0;
+  const affordable = spendLimit.mayCall();
   const judged = await judgeFindings(verification.kept, {
     runtime: options.runtime,
     changeRequest: plan.changeRequest,
@@ -77,12 +76,12 @@ async function judge(
     signal,
     call: roleCall("judge", options),
     enabled: wanted && affordable,
-    keepDropped: options.mode?.ultra === true,
+    keepDropped: settings.ultra,
     carried: stillOpen(reconciled),
   });
   if (wanted && !affordable) {
     judged.warnings.push(
-      `spend limit of $${options.limits?.maxCostUsd} reached: findings were not judged`,
+      `spend limit of $${settings.maxCostUsd} reached: findings were not judged`,
     );
   }
   if (!nothingReviewed) {
