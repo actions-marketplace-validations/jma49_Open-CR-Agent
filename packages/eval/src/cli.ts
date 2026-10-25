@@ -17,8 +17,11 @@ Commands:
   run                  Review the selected PRs with ocra, then score them
   score <run-dir>      Re-score an existing run
   adjudicate <run-dir> Record the labels typed into a golden run's adjudication.json in its cases
-  compare <baseline-run> <run> [--spread-of <second-baseline-run>]
-                       Difference per metric; within the baselines' spread it is "no change"
+  compare <baseline-run> <run> [--spread-of <second-baseline-run>] [--allow-mixed]
+                       Difference per metric; within the baselines' spread it is "no change".
+                       Refuses a side whose reviews ran on different setups (ocra
+                       builds, runtime, models, OpenCode, catalog, configuration)
+                       unless --allow-mixed
   trend <runs-dir> [--series <a,b>]
                        Golden runs over time, per series (label without its
                        trailing -<n>): recall, precision and wrap-up turns per
@@ -26,9 +29,11 @@ Commands:
                        rate, on the cases common to the runs compared
   golden-import --from aacr
                        Write unverified golden case candidates from AACR-Bench
-                       PRs with 1-3 in-scope issues on changed lines, spread
-                       across languages (free, no model; --limit default 50,
-                       --max-change-lines default 300, --out default
+                       PRs: the first 3 in-scope comments written by people
+                       are required claims, further ones and models' optional;
+                       people's first, then spread across languages, with
+                       forbid-seeds.json (free, no model; --limit default
+                       50, --max-change-lines default 300, --out default
                        .ocra/eval/aacr-golden-candidates)
 
 Selection:
@@ -50,9 +55,9 @@ Run:
   --repos-dir <dir>        Clone cache (default ~/.cache/ocra/aacr-bench/repos)
   --max-cost-usd <n>       Stop starting new PRs once review spend reaches this
   --pr-max-cost-usd <n>    Spend limit per PR, passed to ocra review --max-cost-usd
-  --timeout-minutes <n>    Per-PR timeout (default 30)
-  --retry-failed           Review again PRs that failed, or lost tasks to a spent
-                           quota, in an earlier attempt
+  --timeout-minutes <n>    Per-PR timeout, the whole review (default 60)
+  --retry-failed           Review again PRs that failed in an earlier attempt,
+                           on a rate limit for example
   --reviewers <ids>        Passed to ocra review --reviewers
   --ultra                  Passed to ocra review --ultra (recall mode; about twice the cost)
   --config <file>          Passed to ocra review --config: your own configuration
@@ -67,7 +72,8 @@ Run:
   --mock-judge             Offline approximate judge (numbers not comparable)
 
 Models come from OCRA_MODEL_TOP / OCRA_MODEL_STANDARD / OCRA_MODEL_LIGHT.
-The judge uses JUDGE_BASE_URL / JUDGE_API_KEY / JUDGE_MODEL, or GEMINI_API_KEY.
+The judge uses JUDGE_BASE_URL / JUDGE_API_KEY / JUDGE_MODEL, or GEMINI_API_KEY
+with JUDGE_MODEL; JUDGE_MODEL has no default.
 `;
 
 export async function main(

@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import { errorMessage, reportOutputSchema } from "@open-cr-agent/core";
 import { isNotFound } from "@open-cr-agent/core/internal";
 import { z } from "zod";
+import { ranOnSchema } from "./ran-on.js";
 
 const report = reportOutputSchema.shape;
 
@@ -35,11 +36,19 @@ const instanceResultSchema = z.strictObject({
   ),
   // The CLI's exit code; 3 means the review was incomplete.
   exitCode: z.int().exactOptional(),
+  // What cut the review short, when something did: the per-PR spend cap,
+  // a timeout (the PR's, ocra's run's or a task's), or the provider refusing
+  // tasks for its rate limit or a spent quota (provider-limits.ts). Absent
+  // in older results.
+  cutShortBy: z.array(z.enum(["spend_cap", "timeout", "rate_limit", "quota"])).exactOptional(),
   // Absent in results written before it was recorded.
   verdict: report.verdict.exactOptional(),
   // What the review was made with (ocra's report); absent before ocra
   // recorded it.
   provenance: report.provenance,
+  // What the invocation of ocra-eval that reviewed it ran it on; absent
+  // when no review ran, and in results written before it was recorded.
+  ranOn: ranOnSchema.exactOptional(),
   error: z.string().exactOptional(),
 });
 export type InstanceResult = z.output<typeof instanceResultSchema>;

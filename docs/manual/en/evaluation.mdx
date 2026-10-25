@@ -10,6 +10,9 @@ description: Measure review quality on AACR-Bench and on ocra's golden cases wit
 ```bash
 export GEMINI_API_KEY=...
 export OCRA_MODEL_STANDARD=google/gemini-flash-lite-latest
+export JUDGE_BASE_URL=https://api.anthropic.com/v1   # the judge (see Scoring)
+export JUDGE_API_KEY=...
+export JUDGE_MODEL=claude-haiku-5-5
 
 node packages/eval/dist/main.js list --limit 20 --max-change-lines 300          # free preview
 node packages/eval/dist/main.js run  --limit 20 --max-change-lines 300 --label baseline --max-cost-usd 5
@@ -21,9 +24,9 @@ node packages/eval/dist/main.js score .ocra/eval/baseline                       
 | `--limit`, `--seed`, `--languages`, `--max-change-lines`, `--ids` | Seeded, reproducible selection |
 | `--label` | Run name; rerunning the same label resumes |
 | `--out`, `--repos-dir` | Runs directory (default `.ocra/eval`) and clone cache (default `~/.cache/ocra/aacr-bench/repos`) |
-| `--timeout-minutes` | Timeout per PR (default 30) |
+| `--timeout-minutes` | Timeout per PR, for its whole review (default 60). ocra's own limits still apply: `taskTimeoutMinutes` (default 10) and `runTimeoutMinutes` (default 25), which a `--config` file can raise |
 | `--max-cost-usd` | Stop starting new PRs once review spend reaches the cap |
-| `--retry-failed` | Review again PRs that failed, or lost tasks to a spent quota, in an earlier attempt; when that attempt's session is still in the clone, with `ocra review --resume`, so only its unfinished tasks run. The PR's `usage` is then both attempts' |
+| `--retry-failed` | Review again PRs that failed in an earlier attempt, on a rate limit for example; when that attempt's session is still in the clone, with `ocra review --resume`, so only its unfinished tasks run. The PR's `usage` is then both attempts' |
 | `--reviewers` | Passed to `ocra review --reviewers`, for comparing reviewer sets |
 | `--ultra` | Passed to `ocra review --ultra` (recall mode, about twice the cost); recorded in the run |
 | `--config` | Passed to `ocra review --config`: your configuration file (declared providers, limits) |
@@ -33,13 +36,15 @@ node packages/eval/dist/main.js score .ocra/eval/baseline                       
 | `--repeat <k>` | Review the selection `k` times and report the mean and a 95% confidence interval of precision and recall; see [Repeated runs](#repeated-runs) |
 | `--mock-judge` | Offline word-overlap judge for pipeline checks (not comparable) |
 
-When the model's quota is spent (a free-tier daily limit, for example), the run stops starting PRs and marks the rest `skipped_quota`; rerun the same command later to resume.
+When the provider refuses for money or a spent quota (Anthropic's "credit balance is too low" or a spend limit, OpenAI's spent credit, a free tier's daily limit), the run stops starting PRs, logs the provider's answer, and marks the rest `skipped_quota`; rerun the same command once the credit or quota is back to resume. A rate limit, or a provider out of capacity (HTTP 429 or 529), that outlasts ocra's own waits fails only the PR that lost tasks to it: the run goes on with the next PR, and `--retry-failed` reviews the failed one again.
+
+Each PR's result (`instances/<id>.json`) says what cut its review short in `cutShortBy`: `spend_cap` (`--pr-max-cost-usd`), `timeout` (the PR's, or ocra's run or task timeout), `rate_limit` or `quota`. A review cut short by the spend cap or ocra's timeouts, or with tasks that ended at the step cap, is scored as it is, as a user would get it; the summary's "Cut short" line gives the share of reviewed PRs that were incomplete (exit code 3) and of their tasks that ended at the step cap, at the spend cap or on a timeout. A PR stopped by `--timeout-minutes` failed and is not scored.
 
 Reviews always run with `--no-repo-config`, so benchmark repositories cannot load plugins; models come from `OCRA_MODEL_*` or a `--config` file, which is how a run uses a [declared endpoint](./providers#your-own-endpoint). Repositories are cached as blobless clones. PRs whose commits can no longer be fetched are reported as unavailable and not scored.
 
 ## Golden cases
 
-AACR-Bench's references are the comments reviewers happened to leave, so a real issue nobody commented on counts against ocra. For decisions about ocra itself, the repository keeps its own cases in `evals/golden/` ([ADR-0011](https://github.com/jma49/Open-CR-Agent/blob/main/docs/adr/0011-golden-eval-set.md)), used with `--dataset golden`.
+AACR-Bench's references are the comments reviewers happened to leave, about three quarters of them written by AI models, so a real issue nobody commented on counts against ocra. For decisions about ocra itself, the repository keeps its own cases in `evals/golden/` ([ADR-0011](https://github.com/jma49/Open-CR-Agent/blob/main/docs/adr/0011-golden-eval-set.md)), chosen and vetted as [ADR-0036](https://github.com/jma49/Open-CR-Agent/blob/main/docs/adr/0036-golden-case-set-policy.md) and `evals/golden/README.md` say, used with `--dataset golden`.
 
 ```bash
 node packages/eval/dist/main.js list    --dataset golden --tier smoke    # free
@@ -53,12 +58,13 @@ A case is one JSON file named after its `id`, validated when it loads:
 | `id` | Lowercase letters, digits, `.`, `_`, `-`; the file name without `.json` |
 | `repo`, `base`, `head` | A public GitHub repository (`owner/name`) and the two commits of the change |
 | `language`, `tier` | Project language; `smoke` (run before and after every change that needs an eval) or `full` |
-| `source`, `rationale` | Where the case comes from (`ocra-history`, `dogfood` or `aacr`, with a reference) and why it was taken |
-| `expect` | Findings ocra must report: `file`, `lines` (`[from, to]` on the new side), `category` (`correctness`, `security`, `performance`), `minSeverity` (a match below it counts for precision, not recall), `concern`, and optionally `also`: other `file`/`lines` where the same issue is rightly reported (say, the docs promising the behavior), counted once wherever found |
-| `forbid` | Ranges where a finding is wrong: `file`, `lines`, `reason` |
+| `source` | Where the case comes from: `kind` (`ocra-history`, `dogfood`, `aacr`, `github` or `reviewbench`), `ref` (a reference), `licence` (the repository's SPDX licence id, from an allowlist of OSI licences, copyleft included; for a choice of licences, the OSI option) and `date` (the head commit's date, `YYYY-MM-DD`) |
+| `rationale`, `raters` | Why the case was taken; optionally who vetted it and when (`by`, `date`) |
+| `expect` | Claims: findings ocra should report. `id` (a short kebab-case slug, unique in the case; runs, the ceiling and trends pair claims by it), `file`, `lines` (`[from, to]` on the new side), `category` (`correctness`, `security`, `performance`), `minSeverity` (a match below it counts for precision, not recall), `concern`, `origin` (`human-review`, `author-fix`, `ai-reference-vetted`, `model-found-vetted` or `maintainer`), `producer` (`human`, a model id or a tool), `optional` (default `false`), and optionally `also`: other `file`/`lines` where the same issue is rightly reported (say, the docs promising the behavior), counted once wherever found. At most 3 required and 5 optional claims; a required claim spans at most 15 lines, and one only a model vouches for (`model-found-vetted`, `ai-reference-vetted`) is required only at `warning` or above |
+| `forbid` | Ranges where a finding is wrong, at most 3: `file`, `lines`, `reason` |
 | `clean` | `true` for a change with no issue; it cannot have `expect` |
 
-Paths must stay inside the repository. `ceiling` refuses a case naming a file the change does not touch; run it after editing cases, since `run` does not check. `--tier smoke` selects the smoke tier, `--tier full` every case, `--tier adversarial` the attacks with the cases they attack (below); `--golden-dir` reads another directory. `--max-change-lines` does not apply.
+An optional claim is a real issue the reviewers are not required to report: one a compiler or build reports, one in code the change leaves alone, or one only a model has found so far. A finding matching it counts as correct for precision; recall never counts it. Paths must stay inside the repository. `ceiling` refuses a case naming a file the change does not touch, and bounds recall over required claims only; run it after editing cases, since `run` does not check. `--tier smoke` selects the smoke tier, `--tier full` every case, `--tier adversarial` the attacks with the cases they attack (below); `--golden-dir` reads another directory. `--max-change-lines` does not apply.
 
 ### Candidates from AACR-Bench
 
@@ -68,19 +74,22 @@ Paths must stay inside the repository. `ceiling` refuses a case naming a file th
 node packages/eval/dist/main.js golden-import --from aacr --limit 50   # free
 ```
 
-It takes pull requests with one to three comments in ocra's scope (`Code Defect`, `Security Vulnerability`, `Performance`; not maintainability or readability, as in `ceiling`), all on the new side, within `--max-change-lines` (default 300), not already in `--golden-dir`, and keeps one only if `ceiling`'s planning reaches every such comment. Languages take turns under `--limit`; `--seed` and `--languages` work as in a selection. Cases go to `--out` (default `.ocra/eval/aacr-golden-candidates`, which must hold no cases yet) with a `summary.md` of counts by language, category and severity.
+It takes pull requests with comments in ocra's scope (`Code Defect`, `Security Vulnerability`, `Performance`; not maintainability or readability, as in `ceiling`), within `--max-change-lines` (default 300), and not already in `--golden-dir`. The first three comments written by people, in row order, become required claims, the most a case may require; further comments written by people, then those written by models, become optional claims, up to the five a case may hold. Each in-scope comment counts on its own: one on removed lines or without lines, one `ceiling`'s planning cannot reach, and one past the five optional claims are left out, and the case's `rationale` names each with its reason, and which comments written by people are optional; a pull request is skipped only when none is left. Pull requests with a person's comment go first, then those with models' only, and within each group languages take turns under `--limit`; `--seed` and `--languages` work as in a selection, and the same dataset file and seed write the same bytes. Cases go to `--out` (default `.ocra/eval/aacr-golden-candidates`, which must hold no cases yet) with:
 
-A candidate restates human comments, not confirmed bugs: `source.ref` names the dataset rows and says it is not hand-checked, every `minSeverity` is `suggestion`, and there is no `forbid`. Check it against the code at `head`, set severities, add `forbid` ranges and a licence, rename it, and only then move it to `evals/golden/`.
+- `summary.md`: counts by language and category (people's and models' claims apart), producer, licence and reason left out, and the order to vet the cases in: cases with required claims written by people first.
+- `forbid-seeds.json`: the comments AACR-Bench labels incorrect (label 0) on the imported pull requests, with the case, row, file, side, lines, category and producer, to vet into `forbid` ranges. No case includes them.
+
+A candidate restates review comments, not confirmed bugs, and most of AACR-Bench's comments were written by AI models (its `is_ai_comment`): each claim's `origin` and `producer` say whose it was (`human-review` and `human`, or `ai-reference-vetted` and the model), and a model's comment, like a person's past the first three, is optional until vetting makes it required. `source.ref` names the dataset rows, says how the licence was read and that the case is not hand-checked; `source.date` is the head commit's date; every `minSeverity` is `suggestion`, and there is no `forbid`. `source.licence` is what the repository's root files say at `head` (licence texts such as `LICENSE` or `COPYING`, and the licence field of `package.json`, `composer.json`, `Cargo.toml` or `pyproject.toml`) when they agree on one licence on the allowlist. Anything else stays `NOASSERTION`, which no case loads with: no licence file, a text it does not recognise, a choice of licences, a GNU text that does not say `-only` or `-or-later`, or a licence off the allowlist (named in `source.ref`). Check the case against the code at `head` as `evals/golden/README.md` says, set severities, add `forbid` ranges, confirm the licence, rename it, and only then move it to `evals/golden/`.
 
 ### Golden scoring and labels
 
-A golden run adds its own metrics to `summary.md`. A finding matching an `expect` entry is correct; any other is counted by its label:
+A golden run adds its own metrics to `summary.md`. A finding matching a claim, required or optional, is correct; any other is counted by its label:
 
 - labeled valid or invalid earlier (the case's `adjudicated` list; see below for when a label applies);
 - invalid when it falls in a `forbid` range;
 - otherwise unlabeled.
 
-Precision is (matched + valid) / reported, so an unlabeled finding counts against it until labeled; labels are never guessed. A critical finding in a `forbid` range or on a `clean` case, unless labeled valid, is listed as a failure.
+Precision is (matched + valid) / reported, so an unlabeled finding counts against it until labeled; labels are never guessed. Recall is the share of required claims found at or above their `minSeverity`; required claims are matched before optional ones, so an optional claim never takes a finding a required one would match. A critical finding in a `forbid` range or on a `clean` case, unless labeled valid, is listed as a failure.
 
 Unlabeled findings go to `adjudication.json` in the run directory. Set each `label` to `"valid"` or `"invalid"` with a one-line `reason`, then record them in the cases:
 
@@ -88,11 +97,11 @@ Unlabeled findings go to `adjudication.json` in the run directory. Set each `lab
 node packages/eval/dist/main.js adjudicate .ocra/eval/golden-baseline
 ```
 
-A label belongs to one claim about one piece of code. It applies to a later finding with the same fingerprint (reviewer category, file and quoted code) and the same title, or a reworded title the judge calls the same claim; `summary.md` lists reworded ones so you can check the label still fits. Another claim about the same code needs its own label, so a valid label cannot make a wrong claim on the same lines count as correct. Each claim is labeled once. If a valid finding is an expected issue reported elsewhere, add its location to that entry's `also` by hand instead, or it becomes a second expectation. A valid finding with lines also becomes an `expect` entry at `suggestion` severity (raise it by hand if needed), and one on a `clean` case makes the case no longer clean. Re-scoring keeps typed labels.
+A label belongs to one claim about one piece of code. It applies to a later finding with the same fingerprint (reviewer category, file and quoted code) and the same title, or a reworded title the judge calls the same claim; `summary.md` lists reworded ones so you can check the label still fits. Another claim about the same code needs its own label, so a valid label cannot make a wrong claim on the same lines count as correct. Each claim is labeled once. If a valid finding is an expected issue reported elsewhere, add its location to that entry's `also` by hand instead, or it becomes a second expectation. A valid finding with lines also becomes an optional claim at `suggestion` severity (`id` `found-<fingerprint>`, `origin` `model-found-vetted`, `producer` `ocra (model not recorded)`), and one on a `clean` case makes the case no longer clean. Making such a claim required is a vetting decision under ADR-0036, made by hand. Re-scoring keeps typed labels.
 
 ### Recall funnel
 
-To show where a missed finding was lost, `ocra-eval run` keeps each review's session log as `events/<case>.jsonl` in the run directory, and scoring places every expected finding at the furthest stage it reached:
+To show where a missed finding was lost, `ocra-eval run` keeps each review's session log as `events/<case>.jsonl` in the run directory, and scoring places every claim at the furthest stage it reached (the counts cover required claims, as recall does):
 
 | Stage | Meaning |
 |---|---|
@@ -134,11 +143,13 @@ node packages/eval/dist/main.js list --dataset golden --tier adversarial   # fre
 node packages/eval/dist/main.js run  --dataset golden --tier adversarial --label attacks --max-cost-usd 15
 ```
 
-The text is committed on the case's head with a fixed identity and date, so every run reviews the same commit; the clone's working tree, index and refs do not change. Only `--tier adversarial` runs attacks, each with the case it attacks, and `summary.md` compares them: expected findings at or above their minimum severity, the verdict, and findings carrying the canary. Attacks are left out of the run's other metrics and are not labeled. Model runs vary, so read differences across attacks and runs, not one pair.
+The text is committed on the case's head with a fixed identity and date, so every run reviews the same commit; the clone's working tree, index and refs do not change. Only `--tier adversarial` runs attacks, each with the case it attacks, and `summary.md` compares them: claims found at or above their minimum severity (optional ones included: the question is whether the text hid a finding), the verdict, and findings carrying the canary. Attacks are left out of the run's other metrics and are not labeled. Model runs vary, so read differences across attacks and runs, not one pair.
 
 ## Reproducibility
 
 Reviews use fixed sampling: temperature `0` and seed `1` unless `--temperature` and `--model-seed` say otherwise. `run.json` and `summary.json` record what was asked (`info.sampling`); each review's JSON report records what was applied, collected in `summary.json` as `summary.provenance`: the distinct ocra versions, prompt hashes, configuration hashes and sampling settings ([`provenance`](./cli#json-output)), printed on `summary.md`'s Provenance line. More than one value means the run was resumed after a rebuild or a change of setup. `run.json` also records which ocra ran (`info.ocra`): version, checkout commit, whether it had uncommitted changes, and the review agents' step cap, printed on `summary.md`'s `ocra` line. The OpenCode runtime applies no seed and some providers ignore one, so a fixed seed does not make a model deterministic; repeated runs measure what is left.
+
+Each PR's result (`instances/<id>.json`) also records what its review ran on, in `ranOn`: when it ended (`at`); the ocra build (`ocra`: version, commit, uncommitted changes, step cap); the runtime (`runtime`: `opencode` unless the `--config` file names another, absent when only a configuration it `extends` could); the installed `opencode-ai` version (`opencode`, with `OCRA_OPENCODE_BIN` when that replaces the binary); the sha256 of the `--config` file (`config`); and, on OpenCode, the catalog entries of the models its agents use (`catalog`: prices, price tiers, limits, whether temperature is accepted). OpenCode prices calls from its live catalog (models.opencode.ai) and ocra's report does not say which entries it used, so they are read from OpenCode's cached copy (`~/.cache/opencode/models.json`) when the review ends; a refresh during a review can make them newer than the ones it priced with. A PR reused when a run resumes keeps its own, so a run resumed by a later invocation on another commit or catalog shows it. `summary.provenance` adds the distinct values of each (`ocra`, `runtime`, `opencode`, `catalog`) and each agent's tier, model chain and effort from the reports (`agents`), with `null` for a review that recorded none; `summary.md`'s Models line lists only what `OCRA_MODEL_*` set. `run.json` records the last invocation's runtime and OpenCode install (`info.runtime`, `info.opencode`), the `--config` file (`info.config`: its path and sha256, with a copy, anything secret-looking redacted, kept as `config/<sha256>.json` in the run directory, since the file may be gone later; a configuration it `extends` is not copied), and for AACR-Bench the dataset file's sha256 and revision (`info.datasetFile`). The dataset is downloaded at a fixed revision; a cache downloaded before may hold another file, which `run` says. `run.json` and `summary.json` carry a format `version` (`1`): files without one predate it, and a version ocra-eval does not know is refused. Uncommitted changes are not hashed, so two invocations at one commit with different changes look alike: make paid runs from a clean checkout.
 
 ## Repeated runs
 
@@ -159,17 +170,17 @@ node packages/eval/dist/main.js compare .ocra/eval/baseline .ocra/eval/change   
 
 Prints each metric of both runs and the difference. For two repeated runs, precision and recall are compared with a two-sample t test (pooled standard deviation, two-sided, α = 0.05): `better` or `worse` only when the difference is significant, with both 95% intervals and each side's mean. Otherwise the verdict reads `no change within noise (detectable ≥ X)`, X being the smallest true difference the runs would detect four times out of five (power 0.8): (t(0.975, df) + t(0.8, df)) · s_pooled · √(1/k₁ + 1/k₂). So "no change" means "none larger than X", not "the same": three runs a side on the smoke tier detect about 10 points of recall, two expected findings of 18. More runs or more expected findings make X smaller.
 
-Golden runs scored against the same cases and labels also get a paired section: for every expected finding of the cases all runs reviewed, the share of each side's runs that found it, a table of those whose share differs, and a sign test over them (found more often, less often, and the two-sided exact binomial p; `better` or `worse` below 0.05). Using every repeat of every finding, it can show a shift the recall numbers hide. Runs scored against different cases or labels get no paired test; rescore both sides.
+Golden runs scored against the same cases and labels also get a paired section: for every required claim of the cases all runs reviewed, paired by its id, the share of each side's runs that found it, a table of those whose share differs, and a sign test over them (found more often, less often, and the two-sided exact binomial p; `better` or `worse` below 0.05). Using every repeat of every finding, it can show a shift the recall numbers hide. Runs scored against different cases or labels, or before claims had ids, get no paired test; rescore both sides.
 
 For single runs, `--spread-of` (a second baseline run) reports a difference no larger than the gap between the two baseline runs as `no change`; without it the direction is not judged.
 
-`compare` works on AACR-Bench and golden runs. It warns when the runs reviewed different or differently many pull requests, were scored by different judges or against different golden cases or labels, still have unlabeled findings, or differ in ocra version, prompts (`promptHash`), configuration (`configHash`) or sampling, or when one recorded none of that. After labeling, re-score every run you compare (`ocra-eval score <run-dir>`).
+`compare` works on AACR-Bench and golden runs. It refuses, with exit code 2, a side that is not one setup: a run, its repetitions, or a baseline and its `--spread-of` run whose reviews differ in ocra version or build (commit, uncommitted changes, step cap), prompts, configuration, sampling, runtime, OpenCode install, model chains or catalog entries, or of which some recorded none; that is a run resumed after a rebuild, a change of setup or a catalog refresh. Review those PRs again under a new `--label`, or pass `--allow-mixed` to compare anyway, with those differences as warnings. It warns when the runs reviewed different or differently many pull requests, read different AACR-Bench files, were scored by different judges or against different golden cases or labels, still have unlabeled findings, or differ in ocra version, prompts (`promptHash`), configuration (`configHash`), sampling, runtime, OpenCode install, model chains or catalog entries, when a run was made from a checkout with uncommitted changes, or when one recorded none of that. The two runs compared are usually two commits, so their builds are not compared. After labeling, re-score every run you compare (`ocra-eval score <run-dir>`).
 
 ## Trends across runs
 
 ```bash
 node packages/eval/dist/main.js trend .ocra/eval
-node packages/eval/dist/main.js trend .ocra/eval --series free-nvidia-nemotron-3-ultra-550b-a55b-free@main-smoke,free-thinkingmachines-inkling-free@main-smoke
+node packages/eval/dist/main.js trend .ocra/eval --series main-smoke,change-smoke
 ```
 
 Reads every golden run under a directory (any directory with `run.json`, at most four levels down, so a runs directory or a folder of downloaded artifacts) and groups them into series by label without a trailing `-<n>`: `nightly-1`, `nightly-2` and `nightly-3` are one series, and a repeated run's `r1/` … `rk/` belong to its label. `--series` keeps only the series named. For each series it prints:
@@ -177,15 +188,9 @@ Reads every golden run under a directory (any directory with `run.json`, at most
 - each run's golden recall and precision, its commit, and, when its reports record them (`tasks[].wrapUp`), its tasks' wrap-up turns and the findings reported in them;
 - the mean, standard deviation and range of recall and precision: one setup's run-to-run noise;
 - each run's [recall funnel](#recall-funnel) on the common cases, and for every expected finding, where the runs that missed it stopped;
-- with more than one series, each series again on the cases common to all, and for every expected finding, how many runs of each series found it at its severity, and its stability (the share of all those runs that found it). A finding found always or never tells setups apart less than one found about half the time.
+- with more than one series, each series again on the cases common to all, and for every claim (paired by id; optional ones marked), how many runs of each series found it at its severity, and its stability (the share of all those runs that found it). Runs scored before claims had ids are left out of that table, with a warning to rescore them. A finding found always or never tells setups apart less than one found about half the time.
 
-Runs are often partial and the case set grows, so every number is computed on the cases common to the runs it covers; the cases left out are named, and each run's numbers over all its cases stay in the last column. A run read twice counts once. Runs whose `summary.json` predates per-case scores are listed without numbers until re-scored with `ocra-eval score <run-dir>`. The output warns when a series' runs were scored by different judges or against different cases or labels.
-
-### The daily free evaluation (this repository)
-
-The repository's `eval-free.yml` workflow runs the golden tiers on OpenRouter's free models, which cost nothing but share a daily quota (about 50 requests a UTC day for `:free` models on an account without credits, reset at 00:00 UTC; a golden case takes 30 to 210, so a lane finishes about one case a day). It runs at 01:00 UTC and again at 20:00 UTC on what is left, keeping a reserve for the day's pull request reviews (repository variable `OCRA_EVAL_FREE_RESERVE`, default 150). When OpenRouter reports how many requests are left, a run starts only with at least the reserve plus 100 requests left, so on the 50-request quota no run starts until the reserve is lowered.
-
-Each run evaluates one lane, a model on a branch. Scheduled runs take turns over the lanes in `.github/eval-free-lanes.json`; `workflow_dispatch` names one (`model`, `ref`, `tier`). Runs are labeled `free-<model>@<branch>-<tier>-<n>`, resume across days until every case is reviewed, and are scored by the workflow's own `ocra-eval` against the default branch's cases, judged by the lane's model unless `OCRA_EVAL_JUDGE_MODEL` names another. The branch never comes from a pull request, since the job holds the OpenRouter key. A model OpenRouter no longer serves (HTTP 404) or serves only with credits (HTTP 402) fails the run naming the model. Finished runs are kept as artifacts for 90 days; `scripts/eval-free-download.sh [dir] [pattern]` downloads them with `gh` and prints their trend.
+Runs are often partial and the case set grows, so every number is computed on the cases common to the runs it covers; the cases left out are named, and each run's numbers over all its cases stay in the last column. A run read twice counts once. Runs whose `summary.json` predates per-case scores are listed without numbers until re-scored with `ocra-eval score <run-dir>`. The output warns when a series' runs were scored by different judges or against different cases or labels, when a run's reviews were made on different setups (what `compare` refuses), and when a series' runs differ in ocra build or any other part of their setup that `compare` warns about.
 
 ## Recall ceiling (free)
 
@@ -207,4 +212,26 @@ A port of the benchmark's official matching: same file, same diff side, line ran
 
 Reports also give a lenient diagnostic, not the benchmark's metric: the same concern in the same file at any line. A gap means findings were anchored away from the reference (the benchmark allows one line), not missed.
 
-The judge uses `JUDGE_BASE_URL`, `JUDGE_API_KEY` and `JUDGE_MODEL`, or a Gemini key; answers are cached per run, so re-scoring is free. Reports break results down by language, issue category and context level, with tokens, cost, latency and anchoring (the share left at file level, relocation calls).
+Reports break results down by language, issue category and context level, with tokens, cost, latency and anchoring (the share left at file level, relocation calls).
+
+### The judge
+
+The judge is any OpenAI-compatible chat completions endpoint:
+
+| Variable | Meaning |
+|---|---|
+| `JUDGE_API_KEY` | The endpoint's key. Without it, a Gemini key (`GEMINI_API_KEY`, `GOOGLE_GENERATIVE_AI_API_KEY` or `GOOGLE_API_KEY`) is used with Google's endpoint |
+| `JUDGE_BASE_URL` | The endpoint, up to `/chat/completions`; default Google's Gemini endpoint |
+| `JUDGE_MODEL` | The model. Required: there is no default, and scoring stops naming the variable when it is missing |
+
+For Claude through Anthropic's OpenAI-compatible endpoint:
+
+```bash
+export JUDGE_BASE_URL=https://api.anthropic.com/v1
+export JUDGE_API_KEY=...            # an Anthropic API key
+export JUDGE_MODEL=claude-haiku-5-5
+```
+
+The prompt is the benchmark's, with a last line asking for one word, yes or no. The request sends no sampling parameters (Claude refuses `temperature`, `top_p` and `top_k`) and allows 4,000 output tokens, so a model that thinks first has room to answer. Only the answer's first word counts: "yes" is a match, "no" or "not" is not. The official scorer looks for "same" or "similar" anywhere in the answer and so counts "Not the same issue" as a match; on the same answers, ocra's reading can score lower. When an answer is empty, cut off, refused or not a yes or no, the question is asked once more; if the second answer is no better, the pair counts as no match and the summary says how many did. More than 2% of a scoring's questions without a usable answer fails the scoring instead of printing a wrong score.
+
+A request that fails with HTTP 408, 429 or 5xx, or gets no answer in 2 minutes, is tried up to 4 times, with growing pauses or the `Retry-After` the endpoint asks for; a wait over a minute, or any other error, fails the scoring. Answers are kept in `judge-cache.<model>.jsonl` in the run directory as they arrive, so re-scoring asks only what is missing, after a failure too. They are keyed by the model and the judge's version (`judge v2` in the run's judge line), so another model or a later prompt asks again, and `compare` and `trend` warn about runs scored by different judges. The summary's Cost and latency section counts the judge's questions, answers from the cache, requests and tokens.

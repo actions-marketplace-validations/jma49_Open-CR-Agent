@@ -2,8 +2,14 @@ import { describe, expect, it } from "vitest";
 import type { SavedSummary } from "./compare.js";
 import { compareClaims, signTestP } from "./compare-claims.js";
 
-// A golden run of one case whose expected findings were found as `found`.
-const run = (found: boolean[], casesHash = "h1", recall = 0): SavedSummary =>
+// A golden run of one case whose claims were found as `found`; the ids
+// follow `order`, so a run can list the same claims in another order.
+const run = (
+  found: boolean[],
+  casesHash = "h1",
+  recall = 0,
+  order = found.map((_, k) => k),
+): SavedSummary =>
   ({
     summary: {
       overall: { metrics: { precision: 0.5, recall: 0.5, f1: 0.5 } },
@@ -21,7 +27,11 @@ const run = (found: boolean[], casesHash = "h1", recall = 0): SavedSummary =>
             found: found.filter(Boolean).length,
             reported: 1,
             right: 1,
-            claims: found.map((f, k) => ({ concern: `claim ${k + 1} | x`, found: f })),
+            claims: order.map((k) => ({
+              id: `claim-${k + 1}`,
+              concern: `claim ${k + 1} | x`,
+              found: found[k] ?? false,
+            })),
           },
         },
       },
@@ -47,7 +57,7 @@ describe("compareClaims", () => {
     const result = compareClaims(baseline, change);
     expect(result?.test).toMatchObject({ better: 10, worse: 0, tied: 0, verdict: "better" });
     expect(result?.differing[0]).toEqual({
-      id: "c#1",
+      id: "c#claim-1",
       concern: "claim 1 | x",
       baseline: { hits: 0, runs: 3 },
       run: { hits: 2, runs: 3 },
@@ -65,6 +75,18 @@ describe("compareClaims", () => {
     });
   });
 
+  it("pairs claims by id, whatever their order, and leaves optional ones out", () => {
+    const baseline = [run([true, false]), run([true, false])];
+    const reordered = [run([true, false], "h1", 0, [1, 0]), run([true, false], "h1", 0, [1, 0])];
+    expect(compareClaims(baseline, reordered)?.test).toMatchObject({ better: 0, worse: 0 });
+    const withOptional = reordered.map((saved) => {
+      const claims = saved.summary.golden?.cases?.c?.claims ?? [];
+      claims.push({ id: "extra", concern: "found by a model once", found: true, optional: true });
+      return saved;
+    });
+    expect(compareClaims(baseline, withOptional)?.claims).toBe(2);
+  });
+
   it("refuses to pair runs scored against different cases", () => {
     expect(compareClaims([run([true])], [run([true], "h2")])?.refused).toMatch(/different golden/);
   });
@@ -76,6 +98,22 @@ describe("compareClaims", () => {
       return saved;
     };
     expect(compareClaims([unhashed([true])], [unhashed([false])])?.refused).toMatch(/hashed/);
+  });
+
+  it("refuses to pair runs scored before claims had ids, rather than finding no change", () => {
+    const old = (found: boolean[]): SavedSummary => {
+      const saved = run(found);
+      for (const claim of saved.summary.golden?.cases?.c?.claims ?? []) {
+        delete (claim as { id?: string }).id;
+      }
+      return saved;
+    };
+    const result = compareClaims([old([true, true])], [old([false, false])]);
+    expect(result).toMatchObject({
+      claims: 0,
+      refused: "some runs were scored before claims had ids",
+    });
+    expect(result?.test).toBeUndefined();
   });
 
   it("does nothing without per-case scores", () => {
